@@ -32,6 +32,10 @@ assert.match(appTsx, /TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT \+ IOS_ST
 assert.match(appTsx, /paddingTop: 10 \+ TOP_SAFE_AREA_HEIGHT/, "Header must reserve status bar space so call buttons are tappable");
 assert.doesNotMatch(appTsx, /SafeAreaView/, "App must avoid deprecated React Native SafeAreaView warnings");
 assert.match(appTsx, /from "expo-audio"/, "Incoming calls must use the compatible Expo audio module for ringtone playback");
+assert.match(appTsx, /const CAT_MEMES = \[/, "Chat must include cat meme quick-send presets");
+assert.match(appTsx, /cat loaf has joined the chat/, "Cat meme presets must send real chat text");
+assert.match(appTsx, /accessibilityLabel=\{`Send cat meme \$\{item\.label\}`\}/, "Cat meme quick-send buttons must be accessible");
+assert.match(appTsx, /onPress=\{\(\) => sendMessage\(item\.text\)\}/, "Cat meme quick-send buttons must use the normal message persistence path");
 assert.match(appTsx, /directRoomID/, "Mobile app must support deterministic 1-1 direct message rooms");
 assert.match(appTsx, /`dm:\$\{\[firstID, secondID\]\.sort\(\)\.join\(":\"\)\}`/, "1-1 rooms must use explicit private room IDs");
 assert.match(appTsx, /rooms\/\$\{encodeURIComponent\(roomID\)\}\/messages\?userId=\$\{encodeURIComponent\(userID\)\}/, "Private message history requests must include the current user id");

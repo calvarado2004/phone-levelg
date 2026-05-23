@@ -84,6 +84,12 @@ type SocketEvent =
   | { type: "member:joined"; data: Member };
 
 const QUICK_EMOJIS = ["👍", "😂", "❤️", "🔥", "🎉", "👀"];
+const CAT_MEMES = [
+  { label: "loaf", text: "cat loaf has joined the chat 🐱🍞" },
+  { label: "zoomies", text: "midnight zoomies are now in progress 🐈💨" },
+  { label: "judge", text: "the cat is judging this message 😼" },
+  { label: "nap", text: "brb, professional cat nap mode 🐾" }
+];
 
 export default function App() {
   const e2eScreen = getQueryParam("screen");
@@ -842,6 +848,27 @@ export default function App() {
           ))}
         </View>
 
+        <FlatList
+          horizontal
+          data={CAT_MEMES}
+          keyExtractor={item => item.label}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.catMemeList}
+          style={styles.catMemeRow}
+          renderItem={({ item }) => (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Send cat meme ${item.label}`}
+              disabled={!connected}
+              style={[styles.catMemeButton, !connected && styles.disabledButton]}
+              onPress={() => sendMessage(item.text)}
+            >
+              <Text style={styles.catMemeIcon}>🐱</Text>
+              <Text style={styles.catMemeLabel}>{item.label}</Text>
+            </Pressable>
+          )}
+        />
+
         <View style={styles.composer}>
           <TextInput
             value={draft}
@@ -1475,6 +1502,36 @@ const styles = StyleSheet.create({
   },
   emoji: {
     fontSize: 22
+  },
+  catMemeRow: {
+    backgroundColor: "#f7f3ff",
+    borderTopWidth: 1,
+    borderTopColor: "#e5dcff"
+  },
+  catMemeList: {
+    gap: 8,
+    paddingHorizontal: 10,
+    paddingBottom: 8
+  },
+  catMemeButton: {
+    minHeight: 40,
+    borderRadius: 13,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#ddd1ff"
+  },
+  catMemeIcon: {
+    fontSize: 18
+  },
+  catMemeLabel: {
+    color: "#24123d",
+    fontSize: 13,
+    fontWeight: "900",
+    textTransform: "capitalize"
   },
   composer: {
     flexDirection: "row",
