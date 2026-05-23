@@ -32,11 +32,22 @@
       },
       "permissions": [
         "CAMERA",
-        "RECORD_AUDIO"
+        "RECORD_AUDIO",
+        "POST_NOTIFICATIONS",
+        "VIBRATE",
+        "READ_PHONE_STATE",
+        "READ_PHONE_NUMBERS",
+        "CALL_PHONE",
+        "MANAGE_OWN_CALLS",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_MICROPHONE",
+        "USE_FULL_SCREEN_INTENT"
       ]
     },
     "plugins": [
-      "expo-audio"
+      "expo-audio",
+      "expo-notifications",
+      "expo-web-browser"
     ]
   }
 }

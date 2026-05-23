@@ -1,9 +1,11 @@
 import "react-native-get-random-values";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
-import { createAudioPlayer, setAudioModeAsync, setIsAudioActiveAsync, type AudioPlayer } from "expo-audio";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { registerGlobals } from "@livekit/react-native";
-import { RTCView } from "@livekit/react-native-webrtc";
+import * as AuthSession from "expo-auth-session";
+import { setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
+import * as Notifications from "expo-notifications";
+import * as WebBrowser from "expo-web-browser";
+import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
   Alert,
   FlatList,
@@ -15,8 +17,10 @@ import {
   Pressable,
   StyleSheet,
   StatusBar as NativeStatusBar,
+  type StyleProp,
   Text,
   TextInput,
+  type TextStyle,
   Vibration,
   View
 } from "react-native";
@@ -24,27 +28,75 @@ import { LogLevel, Room, RoomEvent, isVideoTrack, setLogLevel, type VideoTrack a
 import {
   Phone,
   PhoneOff,
+  LogOut,
   SendHorizontal,
+  Mail,
   Smile,
   SwitchCamera,
+  Trash2,
   Users,
   Video
 } from "lucide-react-native";
 
-registerGlobals();
+WebBrowser.maybeCompleteAuthSession();
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+    shouldShowBanner: true,
+    shouldShowList: true
+  })
+});
 setLogLevel(LogLevel.silent);
 LogBox.ignoreLogs(["could not determine track dimensions"]);
 
 declare const process: {
   env: Record<string, string | undefined>;
 };
+declare const require: (moduleName: string) => any;
 
-const DEFAULT_API_URL = Platform.OS === "android" ? "http://10.0.2.2:4000" : "http://localhost:4000";
+const NativeRTCView = Platform.OS === "web"
+  ? undefined
+  : (require("@livekit/react-native-webrtc") as { RTCView: ComponentType<any> }).RTCView;
+const registerLiveKitGlobals = Platform.OS === "web"
+  ? undefined
+  : (require("@livekit/react-native") as { registerGlobals: () => void }).registerGlobals;
+let cachedNativeCallKeep: any | null | undefined;
+
+function getNativeCallKeep() {
+  if (Platform.OS !== "ios") return undefined;
+  if (cachedNativeCallKeep !== undefined) return cachedNativeCallKeep ?? undefined;
+  try {
+    cachedNativeCallKeep = require("react-native-callkeep").default;
+  } catch {
+    cachedNativeCallKeep = null;
+  }
+  return cachedNativeCallKeep ?? undefined;
+}
+
+registerLiveKitGlobals?.();
+
+const OPENSHIFT_API_URL = "https://phone-levelg-server-phone-levelg.apps.ocp-think.levelg.io";
+const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? OPENSHIFT_API_URL;
 const DEFAULT_LIVEKIT_URL = Platform.OS === "android" ? "ws://10.0.2.2:7880" : "ws://localhost:7880";
-const API_URL = process.env.EXPO_PUBLIC_API_URL ?? DEFAULT_API_URL;
 const LIVEKIT_URL = process.env.EXPO_PUBLIC_LIVEKIT_URL ?? DEFAULT_LIVEKIT_URL;
+const GOOGLE_CLIENT_ID =
+  Platform.OS === "ios"
+    ? process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID
+    : Platform.OS === "android"
+      ? process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID
+      : process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+const GOOGLE_DISCOVERY = {
+  authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+  tokenEndpoint: "https://oauth2.googleapis.com/token",
+  userInfoEndpoint: "https://www.googleapis.com/oauth2/v3/userinfo"
+};
 const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
+const STORED_SESSION_KEY = "phone-levelg.session.v1";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const ANDROID_STATUS_BAR_HEIGHT = Platform.OS === "android" ? NativeStatusBar.currentHeight ?? 0 : 0;
 const IOS_STATUS_BAR_HEIGHT = Platform.OS === "ios" ? 44 : 0;
 const TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT + IOS_STATUS_BAR_HEIGHT;
@@ -52,6 +104,22 @@ const TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT + IOS_STATUS_BAR_HEIGHT;
 type Session = {
   userId: string;
   displayName: string;
+  accountEmail: string;
+  avatarURL?: string;
+};
+
+type StoredSession = {
+  session: Session;
+  serverURL: string;
+  inviteCode: string;
+  expiresAt: number;
+};
+
+type GoogleUserInfo = {
+  email?: string;
+  email_verified?: boolean;
+  name?: string;
+  picture?: string;
 };
 
 type Message = {
@@ -66,11 +134,13 @@ type Message = {
 type Member = {
   id: string;
   displayName: string;
+  avatarURL?: string;
   createdAt?: string;
   lastSeenAt: string;
 };
 
 type IncomingCall = {
+  callUUID: string;
   roomId: string;
   sender: string;
   mode: "voice" | "video";
@@ -78,6 +148,7 @@ type IncomingCall = {
 
 type SocketEvent =
   | { type: "message:new"; data: Message }
+  | { type: "message:clear"; data: { roomId: string; senderId: string } }
   | { type: "call:ring"; data: { roomId: string; senderId: string; sender: string; mode?: "voice" | "video" } }
   | { type: "call:end"; data: { roomId: string; senderId: string; sender: string } }
   | { type: "call:reject"; data: { roomId: string; senderId: string; sender: string } }
@@ -93,12 +164,26 @@ const CAT_MEMES = [
 
 export default function App() {
   const e2eScreen = getQueryParam("screen");
+  const googleRedirectURI = AuthSession.makeRedirectUri({ scheme: "phonelevelg", path: "oauthredirect" });
+  const [googleRequest, googleResponse, promptGoogleSignIn] = AuthSession.useAuthRequest(
+    {
+      clientId: GOOGLE_CLIENT_ID ?? "missing-google-client-id",
+      redirectUri: googleRedirectURI,
+      responseType: AuthSession.ResponseType.Token,
+      scopes: ["openid", "profile", "email"],
+      extraParams: { prompt: "select_account" }
+    },
+    GOOGLE_DISCOVERY
+  );
   const [session, setSession] = useState<Session | null>(
     E2E_MODE && e2eScreen !== "login"
-      ? { userId: "e2e-user", displayName: "Carlos" }
+      ? { userId: "e2e-user", displayName: "Carlos", accountEmail: "carlos@example.test" }
       : null
   );
   const [displayName, setDisplayName] = useState("");
+  const [accountEmail, setAccountEmail] = useState("");
+  const [avatarURL, setAvatarURL] = useState("");
+  const [serverURL, setServerURL] = useState(DEFAULT_API_URL);
   const [inviteCode, setInviteCode] = useState("home");
   const [messages, setMessages] = useState<Message[]>(() => E2E_MODE && e2eScreen !== "login" ? [
     {
@@ -137,25 +222,210 @@ export default function App() {
   const socketRef = useRef<WebSocket | null>(null);
   const roomRef = useRef<Room | null>(null);
   const activeCallRoomIDRef = useRef<string | null>(null);
+  const activeCallUUIDRef = useRef<string | null>(null);
   const incomingCallRef = useRef<IncomingCall | null>(null);
-  const ringtoneRef = useRef<AudioPlayer | null>(null);
+  const nativeCallsRef = useRef<Record<string, IncomingCall>>({});
+  const callKeepReadyRef = useRef(false);
+  const incomingCallNotificationRef = useRef<string | null>(null);
+  const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
+  const googleAuthConfigured = Boolean(GOOGLE_CLIENT_ID);
 
   const activeRoomID = useMemo(() => {
     if (!session || !selectedMember) return ROOM_ID;
     return directRoomID(session.userId, selectedMember.id);
   }, [selectedMember, session]);
   const activeRoomTitle = selectedMember?.displayName ?? "Home";
+  const headerTitle = session ? `${activeRoomTitle} - ${session.displayName}` : activeRoomTitle;
   const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
   const displayedVideoTrack = remoteVideoTrack ?? localVideoTrack;
+  const isFullScreenVideoCall = callActive && callMode === "video";
 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
   }, [incomingCall]);
 
+  useEffect(() => {
+    if (E2E_MODE) return;
+    void restoreStoredSession();
+  }, []);
+
+  useEffect(() => {
+    const nativeCallKeep = getNativeCallKeep();
+    if (E2E_MODE || !nativeCallKeep) return;
+    const listeners = [
+      nativeCallKeep.addEventListener("answerCall", ({ callUUID }: { callUUID: string }) => {
+        void acceptNativeIncomingCall(callUUID);
+      }),
+      nativeCallKeep.addEventListener("endCall", ({ callUUID }: { callUUID: string }) => {
+        void endNativeCall(callUUID);
+      }),
+      nativeCallKeep.addEventListener("didActivateAudioSession", () => {
+        void setIsAudioActiveAsync(true);
+      })
+    ];
+
+    void setupNativeCallUI();
+
+    return () => {
+      listeners.forEach(listener => listener.remove());
+      nativeCallKeep.endAllCalls?.();
+      callKeepReadyRef.current = false;
+    };
+  }, []);
+
+  async function setupNativeCallUI() {
+    const nativeCallKeep = getNativeCallKeep();
+    if (!nativeCallKeep || callKeepReadyRef.current) return;
+
+    try {
+      const accepted = await nativeCallKeep.setup({
+        ios: {
+          appName: "Phone LevelG",
+          supportsVideo: true,
+          includesCallsInRecents: false
+        },
+        android: {
+          alertTitle: "Phone LevelG calls",
+          alertDescription: "Allow Phone LevelG to show native incoming call screens.",
+          cancelButton: "Cancel",
+          okButton: "Allow",
+          imageName: "ic_launcher",
+          additionalPermissions: [PermissionsAndroid.PERMISSIONS.READ_PHONE_STATE],
+          selfManaged: false,
+          foregroundService: {
+            channelId: "phone-levelg-calls",
+            channelName: "Phone LevelG calls",
+            notificationTitle: "Phone LevelG call active",
+            notificationIcon: "ic_launcher"
+          }
+        }
+      });
+      callKeepReadyRef.current = accepted !== false;
+      if (Platform.OS === "android") {
+        nativeCallKeep.setAvailable(true);
+      }
+    } catch {
+      callKeepReadyRef.current = false;
+    }
+  }
+
+  async function displayNativeIncomingCall(call: IncomingCall) {
+    const nativeCallKeep = getNativeCallKeep();
+    if (!nativeCallKeep) return;
+
+    await setupNativeCallUI();
+    if (!callKeepReadyRef.current) return;
+
+    try {
+      nativeCallKeep.displayIncomingCall(
+        call.callUUID,
+        call.roomId,
+        call.sender,
+        "generic",
+        call.mode === "video",
+        { supportsHolding: false, supportsGrouping: false }
+      );
+    } catch {
+      // The in-app call sheet and system notification remain as fallback.
+    }
+  }
+
+  async function acceptNativeIncomingCall(callUUID: string) {
+    const call = nativeCallsRef.current[callUUID] ?? incomingCallRef.current;
+    if (!call) return;
+
+    activeCallUUIDRef.current = callUUID;
+    setIncomingCall(null);
+    incomingCallRef.current = null;
+    await joinCall(call.mode, call.roomId, false);
+    getNativeCallKeep()?.setCurrentCallActive?.(callUUID);
+  }
+
+  async function endNativeCall(callUUID: string) {
+    const call = nativeCallsRef.current[callUUID];
+    delete nativeCallsRef.current[callUUID];
+
+    if (activeCallUUIDRef.current === callUUID) {
+      await endCurrentCall({ announce: true, status: "Call ended", native: false });
+      return;
+    }
+
+    if (incomingCallRef.current?.callUUID === callUUID || call) {
+      await declineIncomingCall({ announce: true });
+    }
+  }
+
+  async function restoreStoredSession() {
+    try {
+      const stored = await AsyncStorage.getItem(STORED_SESSION_KEY);
+      if (!stored) return;
+
+      const payload = JSON.parse(stored) as StoredSession;
+      if (!payload.session?.userId || payload.expiresAt <= Date.now()) {
+        await AsyncStorage.removeItem(STORED_SESSION_KEY);
+        return;
+      }
+
+      setServerURL(payload.serverURL || DEFAULT_API_URL);
+      setInviteCode(payload.inviteCode || "home");
+      setDisplayName(payload.session.displayName);
+      setAccountEmail(payload.session.accountEmail);
+      setAvatarURL(payload.session.avatarURL ?? "");
+      setSession(payload.session);
+    } catch {
+      await AsyncStorage.removeItem(STORED_SESSION_KEY).catch(() => undefined);
+    }
+  }
+
+  async function persistSession(nextSession: Session, nextServerURL: string, nextInviteCode: string) {
+    const payload: StoredSession = {
+      session: nextSession,
+      serverURL: nextServerURL,
+      inviteCode: nextInviteCode,
+      expiresAt: Date.now() + SESSION_TTL_MS
+    };
+    await AsyncStorage.setItem(STORED_SESSION_KEY, JSON.stringify(payload));
+  }
+
+  useEffect(() => {
+    if (googleResponse?.type !== "success") return;
+    const accessToken = googleResponse.authentication?.accessToken;
+    if (!accessToken) {
+      Alert.alert("Google sign-in failed", "Google did not return an access token.");
+      return;
+    }
+
+    void loadGoogleAccount(accessToken);
+  }, [googleResponse]);
+
+  async function loadGoogleAccount(accessToken: string) {
+    try {
+      const response = await fetch(GOOGLE_DISCOVERY.userInfoEndpoint, {
+        headers: { Authorization: `Bearer ${accessToken}` }
+      });
+      if (!response.ok) {
+        throw new Error(`Google userinfo failed with status ${response.status}`);
+      }
+
+      const profile = await response.json() as GoogleUserInfo;
+      const email = profile.email?.trim().toLowerCase();
+      if (!email || profile.email_verified === false) {
+        Alert.alert("Google sign-in failed", "Use a verified Google email account.");
+        return;
+      }
+
+      setAccountEmail(email);
+      setAvatarURL(normalizeAvatarURL(profile.picture ?? ""));
+      setDisplayName(current => current.trim() || profile.name?.trim() || email.split("@")[0]);
+    } catch {
+      Alert.alert("Google sign-in failed", "Could not read the Google account email.");
+    }
+  }
+
   async function refreshMessages(roomID = activeRoomID, userID = session?.userId) {
     if (!userID) return;
     try {
-      const payload = await fetchJSON(`${API_URL}/rooms/${encodeURIComponent(roomID)}/messages?userId=${encodeURIComponent(userID)}`);
+      const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(roomID)}/messages?userId=${encodeURIComponent(userID)}`);
       const nextMessages = (payload.messages ?? []) as Message[];
       setMessages(current => messagesEqual(current, nextMessages) ? current : nextMessages);
     } catch {
@@ -165,7 +435,7 @@ export default function App() {
 
   async function refreshMembers() {
     try {
-      const payload = await fetchJSON(`${API_URL}/members`);
+      const payload = await fetchJSON(`${apiURL}/members`);
       const nextMembers = (payload.members ?? []) as Member[];
       setMembers(current => membersEqual(current, nextMembers) ? current : nextMembers);
     } catch {
@@ -176,7 +446,7 @@ export default function App() {
   async function refreshDirectInbox() {
     if (!session) return;
     try {
-      const payload = await fetchJSON(`${API_URL}/direct/inbox?userId=${encodeURIComponent(session.userId)}`);
+      const payload = await fetchJSON(`${apiURL}/direct/inbox?userId=${encodeURIComponent(session.userId)}`);
       const inboxMessages = (payload.messages ?? []) as Message[];
       const unreadRooms = inboxMessages
         .filter(message => message.roomId !== activeRoomID && message.senderId !== session.userId)
@@ -212,7 +482,7 @@ export default function App() {
 
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
-    const wsURL = `${API_URL.replace(/^http/, "ws")}/ws?roomId=${encodeURIComponent(activeRoomID)}&userId=${encodeURIComponent(session.userId)}&displayName=${encodeURIComponent(session.displayName)}`;
+    const wsURL = `${apiURL.replace(/^http/, "ws")}/ws?roomId=${encodeURIComponent(activeRoomID)}&userId=${encodeURIComponent(session.userId)}&displayName=${encodeURIComponent(session.displayName)}`;
     const scheduleReconnect = () => {
       if (disposed) return;
       reconnectTimer = setTimeout(connectSocket, 1500);
@@ -227,9 +497,19 @@ export default function App() {
           void refreshMembers();
         }
       }
+      if (payload.type === "message:clear") {
+        setUnreadRoomIDs(current => current.filter(roomID => roomID !== payload.data.roomId));
+        if (payload.data.roomId === activeRoomID) {
+          setMessages([]);
+        }
+      }
       if (payload.type === "call:ring" && payload.data.senderId !== session.userId) {
         const ringMode = payload.data.mode === "video" ? "video" : "voice";
-        setIncomingCall({ roomId: payload.data.roomId, sender: payload.data.sender, mode: ringMode });
+        const callUUID = createCallUUID();
+        const nextCall: IncomingCall = { callUUID, roomId: payload.data.roomId, sender: payload.data.sender, mode: ringMode };
+        nativeCallsRef.current[callUUID] = nextCall;
+        setIncomingCall(nextCall);
+        void displayNativeIncomingCall(nextCall);
         void startIncomingCallTone();
       }
       if (payload.type === "call:end" && payload.data.senderId !== session.userId) {
@@ -282,7 +562,7 @@ export default function App() {
       socketRef.current = null;
       void stopIncomingCallTone();
     };
-  }, [activeRoomID, session]);
+  }, [activeRoomID, apiURL, session]);
 
   useEffect(() => {
     return () => {
@@ -300,27 +580,61 @@ export default function App() {
       }
     }, 3000);
     return () => clearInterval(intervalID);
-  }, [activeRoomID, selectedMember, session]);
+  }, [activeRoomID, apiURL, selectedMember, session]);
 
   async function login() {
+    const nextAccountEmail = accountEmail.trim().toLowerCase();
+    const nextDisplayName = (displayName.trim() || nextAccountEmail.split("@")[0] || "LevelG").slice(0, 40);
+
     if (E2E_MODE) {
-      setSession({ userId: "e2e-user", displayName: displayName || "Carlos" });
+      setSession({ userId: "e2e-user", displayName: nextDisplayName || "Carlos", accountEmail: nextAccountEmail || "carlos@example.test", avatarURL });
       setConnected(true);
       return;
     }
 
-    const response = await fetch(`${API_URL}/login`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ displayName, inviteCode })
-    });
-
-    if (!response.ok) {
-      Alert.alert("Login failed", "Check the invite code and server URL.");
+    if (!nextAccountEmail || !nextAccountEmail.includes("@")) {
+      Alert.alert("Google email required", "Sign in with Google or enter the Google email for this account.");
       return;
     }
 
-    setSession(await response.json());
+    try {
+      const response = await fetch(`${apiURL}/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ displayName: nextDisplayName, accountEmail: nextAccountEmail, avatarURL: normalizeAvatarURL(avatarURL), inviteCode })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "");
+        Alert.alert("Login failed", `Server returned ${response.status}. Check the server URL and secret.${errorText ? `\n\n${errorText.slice(0, 180)}` : ""}`);
+        return;
+      }
+
+      const nextSession = await response.json() as Session;
+      setSession(nextSession);
+      await persistSession(nextSession, apiURL, inviteCode.trim());
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unknown network error";
+      Alert.alert("Server unreachable", `Could not connect to ${apiURL}.\n\n${message}`);
+    }
+  }
+
+  async function logout() {
+    await endCurrentCall({ announce: true, status: "Ready" }).catch(() => undefined);
+    socketRef.current?.close();
+    socketRef.current = null;
+    await stopIncomingCallTone().catch(() => undefined);
+    await AsyncStorage.removeItem(STORED_SESSION_KEY).catch(() => undefined);
+    setSession(null);
+    setSelectedMember(null);
+    setMessages([]);
+    setMembers([]);
+    setUnreadRoomIDs([]);
+    setIncomingCall(null);
+    incomingCallRef.current = null;
+    setConnected(false);
+    setCallActive(false);
+    setCallStatus("Ready");
   }
 
   function sendSocket(type: string, data: unknown) {
@@ -332,7 +646,7 @@ export default function App() {
     if (!session || !text.trim()) return;
     const nextText = text.trim();
     try {
-      const payload = await fetchJSON(`${API_URL}/rooms/${encodeURIComponent(activeRoomID)}/messages`, {
+      const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -348,6 +662,34 @@ export default function App() {
     }
   }
 
+  async function deleteDirectChat() {
+    if (!session || !selectedMember || !activeRoomID.startsWith("dm:")) return;
+
+    const runDelete = async () => {
+      try {
+        const response = await fetch(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/messages?userId=${encodeURIComponent(session.userId)}`, {
+          method: "DELETE"
+        });
+        if (!response.ok) {
+          throw new Error("delete failed");
+        }
+        setMessages([]);
+        setUnreadRoomIDs(current => current.filter(roomID => roomID !== activeRoomID));
+      } catch {
+        Alert.alert("Chat not deleted", "The server did not delete this private chat. Check the connection and try again.");
+      }
+    };
+
+    Alert.alert(
+      "Delete private chat",
+      `Delete the 1-1 chat with ${selectedMember.displayName}? This removes the conversation for both members.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        { text: "Delete", style: "destructive", onPress: () => void runDelete() }
+      ]
+    );
+  }
+
   async function joinCall(mode: "voice" | "video", roomID = activeRoomID, announce = true) {
     if (!session) return;
     await stopIncomingCallTone({ deactivateAudio: false });
@@ -355,6 +697,17 @@ export default function App() {
       await endCurrentCall({ announce: false, status: "Switching call" });
     }
     activeCallRoomIDRef.current = roomID;
+    if (!activeCallUUIDRef.current) {
+      const callUUID = createCallUUID();
+      activeCallUUIDRef.current = callUUID;
+      if (announce) {
+        try {
+          getNativeCallKeep()?.startCall(callUUID, roomID, activeRoomTitle, "generic", mode === "video");
+        } catch {
+          // Native outgoing call UI is best-effort; the in-app call UI remains active.
+        }
+      }
+    }
     setCallMode(mode);
     setCallActive(true);
     setCallStatus("Connecting");
@@ -371,7 +724,7 @@ export default function App() {
         return;
       }
 
-      const response = await fetch(`${API_URL}/calls/token`, {
+      const response = await fetch(`${apiURL}/calls/token`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -395,6 +748,10 @@ export default function App() {
         setRemoteParticipantCount(room.remoteParticipants.size);
         if (announce) {
           sendSocket("call:ring", { roomId: roomID, mode });
+        }
+        if (activeCallUUIDRef.current) {
+          getNativeCallKeep()?.reportConnectedOutgoingCallWithUUID?.(activeCallUUIDRef.current);
+          getNativeCallKeep()?.setCurrentCallActive?.(activeCallUUIDRef.current);
         }
       });
       room.on(RoomEvent.ParticipantConnected, () => {
@@ -458,15 +815,23 @@ export default function App() {
     await endCurrentCall({ announce: true, status: "Call ended" });
   }
 
-  async function endCurrentCall({ announce, status }: { announce: boolean; status: string }) {
+  async function endCurrentCall({ announce, status, native = true }: { announce: boolean; status: string; native?: boolean }) {
     await stopIncomingCallTone();
     const roomID = activeCallRoomIDRef.current;
+    const callUUID = activeCallUUIDRef.current;
     if (announce && roomID) {
       sendSocket("call:end", { roomId: roomID });
+    }
+    if (native && callUUID) {
+      getNativeCallKeep()?.endCall(callUUID);
     }
     const room = roomRef.current;
     roomRef.current = null;
     activeCallRoomIDRef.current = null;
+    activeCallUUIDRef.current = null;
+    if (callUUID) {
+      delete nativeCallsRef.current[callUUID];
+    }
     if (room) {
       await room.localParticipant.setCameraEnabled(false).catch(() => undefined);
       await room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
@@ -487,6 +852,10 @@ export default function App() {
     const call = incomingCallRef.current;
     if (options.announce !== false && call) {
       sendSocket("call:reject", { roomId: call.roomId });
+      getNativeCallKeep()?.rejectCall(call.callUUID);
+    }
+    if (call) {
+      delete nativeCallsRef.current[call.callUUID];
     }
     await stopIncomingCallTone();
     setIncomingCall(null);
@@ -496,48 +865,61 @@ export default function App() {
   async function acceptIncomingCall() {
     if (!incomingCall) return;
     const nextCall = incomingCall;
+    activeCallUUIDRef.current = nextCall.callUUID;
     setIncomingCall(null);
     await joinCall(nextCall.mode, nextCall.roomId, false);
+    getNativeCallKeep()?.setCurrentCallActive?.(nextCall.callUUID);
   }
 
   async function startIncomingCallTone() {
     Vibration.vibrate([0, 750, 350], true);
-    if (ringtoneRef.current) return;
     try {
-      await setIsAudioActiveAsync(true);
-      await setAudioModeAsync({
-        allowsRecording: false,
-        playsInSilentMode: true,
-        interruptionMode: "doNotMix",
-        shouldPlayInBackground: false,
-        shouldRouteThroughEarpiece: false
+      await ensureIncomingCallNotifications();
+      if (incomingCallNotificationRef.current) {
+        await Notifications.dismissNotificationAsync(incomingCallNotificationRef.current).catch(() => undefined);
+      }
+
+      const call = incomingCallRef.current;
+      const notificationID = await Notifications.scheduleNotificationAsync({
+        content: {
+          title: call?.mode === "video" ? "Incoming video call" : "Incoming voice call",
+          body: call?.sender ? `${call.sender} is calling on Phone LevelG` : "Phone LevelG call",
+          sound: "defaultRingtone",
+          priority: Notifications.AndroidNotificationPriority.MAX
+        },
+        trigger: Platform.OS === "android" ? { channelId: INCOMING_CALL_CHANNEL_ID } : null
       });
-      const player = createAudioPlayer(require("./assets/incoming-call.wav"), {
-        keepAudioSessionActive: true
-      });
-      player.loop = true;
-      player.volume = 0.85;
-      player.play();
-      ringtoneRef.current = player;
+      incomingCallNotificationRef.current = notificationID;
     } catch {
-      // Vibration remains active if the platform refuses ringtone playback.
+      // Vibration remains active if the platform refuses notification playback.
     }
   }
 
   async function stopIncomingCallTone(options: { deactivateAudio?: boolean } = {}) {
     Vibration.cancel();
-    const player = ringtoneRef.current;
-    ringtoneRef.current = null;
-    if (player) {
-      try {
-        player.pause();
-        player.remove();
-      } catch {
-        // The player may already be released during reloads or navigation.
-      }
+    const notificationID = incomingCallNotificationRef.current;
+    incomingCallNotificationRef.current = null;
+    if (notificationID) {
+      await Notifications.dismissNotificationAsync(notificationID).catch(() => undefined);
     }
     if (options.deactivateAudio !== false) {
       await resetAudioSession();
+    }
+  }
+
+  async function ensureIncomingCallNotifications() {
+    const currentPermissions = await Notifications.getPermissionsAsync();
+    if (!currentPermissions.granted) {
+      await Notifications.requestPermissionsAsync();
+    }
+
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync(INCOMING_CALL_CHANNEL_ID, {
+        name: "Incoming calls",
+        importance: Notifications.AndroidImportance.MAX,
+        vibrationPattern: [0, 750, 350],
+        sound: "defaultRingtone"
+      });
     }
   }
 
@@ -640,29 +1022,93 @@ export default function App() {
           <Text style={styles.subtitle}>Private calls and messages for your home network.</Text>
         </View>
         <View style={styles.loginPanel}>
+          <Pressable
+            disabled={!googleAuthConfigured || !googleRequest}
+            style={[styles.googleButton, (!googleAuthConfigured || !googleRequest) && styles.disabledButton]}
+            onPress={() => void promptGoogleSignIn()}
+          >
+            <Mail color={googleAuthConfigured ? "#24123d" : "#7c8794"} size={20} />
+            <Text style={styles.googleButtonText}>
+              {googleAuthConfigured ? "Sign in with Google" : "Configure Google OAuth client ID"}
+            </Text>
+          </Pressable>
+          {accountEmail && (
+            <View style={styles.accountPill}>
+              <Text style={styles.accountPillLabel}>Google account</Text>
+              <Text style={styles.accountPillText} numberOfLines={1}>{accountEmail}</Text>
+            </View>
+          )}
+          <TextInput
+            value={accountEmail}
+            onChangeText={setAccountEmail}
+            placeholder="Google email"
+            placeholderTextColor="#7c8794"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="email-address"
+            style={styles.input}
+          />
           <TextInput
             value={displayName}
             onChangeText={setDisplayName}
-            placeholder="Name"
+            placeholder="Display name"
             placeholderTextColor="#7c8794"
             autoCapitalize="words"
             style={styles.input}
           />
           <TextInput
-            value={inviteCode}
-            onChangeText={setInviteCode}
-            placeholder="Invite code"
+            value={serverURL}
+            onChangeText={setServerURL}
+            placeholder="Server URL"
             placeholderTextColor="#7c8794"
             autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            style={styles.input}
+          />
+          <TextInput
+            value={inviteCode}
+            onChangeText={setInviteCode}
+            placeholder="Server secret"
+            placeholderTextColor="#7c8794"
+            autoCapitalize="none"
+            autoCorrect={false}
             returnKeyType="go"
             onSubmitEditing={login}
             secureTextEntry
             style={styles.input}
           />
+          <Text style={styles.loginHint}>Default server: OpenShift. The Google email identifies the account; the server URL and secret choose the private backend.</Text>
           <Pressable style={styles.primaryButton} onPress={login}>
-            <Text style={styles.primaryButtonText}>Join</Text>
+            <Text style={styles.primaryButtonText}>Connect</Text>
           </Pressable>
         </View>
+      </View>
+    );
+  }
+
+  if (isFullScreenVideoCall) {
+    return (
+      <View style={styles.fullScreenCall}>
+        <ExpoStatusBar style="light" />
+        <View style={styles.fullScreenVideoFrame}>
+          {displayedVideoTrack ? (
+            <CameraStreamView key={displayedVideoTrack.sid} track={displayedVideoTrack} mirror={!remoteVideoTrack} zOrder={0} />
+          ) : (
+            <View style={styles.fullScreenVideoPlaceholder}>
+              <Video color="#c4b5fd" size={36} />
+            </View>
+          )}
+        </View>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel="End call"
+          hitSlop={16}
+          style={styles.fullScreenHangupButton}
+          onPress={leaveCall}
+        >
+          <PhoneOff color="#ffffff" size={28} />
+        </Pressable>
       </View>
     );
   }
@@ -677,15 +1123,25 @@ export default function App() {
         <View style={styles.header}>
           <View style={styles.identity}>
             <View style={styles.avatar}>
-              <Text style={styles.avatarText}>LG</Text>
+              <UserAvatar displayName={session.displayName} avatarURL={session.avatarURL} size={46} textStyle={styles.avatarText} />
               <View style={[styles.presence, connected ? styles.online : styles.offline]} />
             </View>
             <View>
-              <Text style={styles.roomTitle}>{activeRoomTitle}</Text>
+              <Text style={styles.roomTitle} numberOfLines={1}>{headerTitle}</Text>
               <Text style={styles.status}>{connected ? callStatus : "Offline"}</Text>
             </View>
           </View>
           <View style={styles.headerActions}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Log out"
+              hitSlop={12}
+              android_ripple={{ color: "#6d28d9", borderless: false }}
+              style={styles.secondaryIconButton}
+              onPress={() => void logout()}
+            >
+              <LogOut color="#f8fafc" size={19} />
+            </Pressable>
             <Pressable
               accessibilityRole="button"
               accessibilityLabel={`Start voice call in ${activeRoomTitle}`}
@@ -799,7 +1255,7 @@ export default function App() {
                   onPress={() => setSelectedMember(item)}
                 >
                   <View style={styles.memberAvatar}>
-                    <Text style={styles.memberAvatarText}>{initials(item.displayName)}</Text>
+                    <UserAvatar displayName={item.displayName} avatarURL={item.avatarURL} size={34} textStyle={styles.memberAvatarText} />
                   </View>
                   <View>
                     <Text style={styles.memberName} numberOfLines={1}>{item.displayName}</Text>
@@ -811,9 +1267,21 @@ export default function App() {
             }}
           />
           {selectedMember && (
-            <Pressable style={styles.homeRoomButton} onPress={() => setSelectedMember(null)}>
-              <Text style={styles.homeRoomText}>Back to Home room</Text>
-            </Pressable>
+            <View style={styles.privateChatActions}>
+              <Pressable style={styles.homeRoomButton} onPress={() => setSelectedMember(null)}>
+                <Text style={styles.homeRoomText}>Back to Home room</Text>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Delete private chat with ${selectedMember.displayName}`}
+                hitSlop={12}
+                style={styles.deleteChatButton}
+                onPress={() => void deleteDirectChat()}
+              >
+                <Trash2 color="#7c2d12" size={18} />
+                <Text style={styles.deleteChatText}>Delete chat</Text>
+              </Pressable>
+            </View>
           )}
         </View>
 
@@ -909,8 +1377,16 @@ function CameraStreamView({ track, mirror, zOrder }: { track: LiveKitVideoTrack;
     );
   }
 
+  if (!NativeRTCView) {
+    return (
+      <View style={styles.localVideoFallback}>
+        <Video color="#ffffff" size={20} />
+      </View>
+    );
+  }
+
   return (
-    <RTCView
+    <NativeRTCView
       streamURL={streamURL}
       style={styles.videoView}
       objectFit="cover"
@@ -967,6 +1443,7 @@ function membersEqual(left: Member[], right: Member[]) {
     return other &&
       member.id === other.id &&
       member.displayName === other.displayName &&
+      member.avatarURL === other.avatarURL &&
       member.createdAt === other.createdAt &&
       member.lastSeenAt === other.lastSeenAt;
   });
@@ -984,6 +1461,26 @@ function initials(name: string) {
   return `${first}${second}`.toUpperCase();
 }
 
+function UserAvatar({ displayName, avatarURL, size, textStyle }: { displayName: string; avatarURL?: string; size: number; textStyle: StyleProp<TextStyle> }) {
+  const safeAvatarURL = normalizeAvatarURL(avatarURL ?? "");
+  if (safeAvatarURL) {
+    return (
+      <Image
+        source={{ uri: safeAvatarURL }}
+        style={{ width: size, height: size, borderRadius: Math.max(10, size / 3) }}
+      />
+    );
+  }
+
+  return <Text style={textStyle}>{initials(displayName)}</Text>;
+}
+
+function normalizeAvatarURL(value: string) {
+  const trimmed = value.trim();
+  if (trimmed.length > 512) return "";
+  return trimmed.startsWith("https://") ? trimmed : "";
+}
+
 function callParticipantLabel(mode: "voice" | "video", remoteParticipantCount: number) {
   const media = mode === "video" ? "Camera and microphone are on" : "Microphone is on";
   if (remoteParticipantCount === 0) {
@@ -997,6 +1494,20 @@ function callParticipantLabel(mode: "voice" | "video", remoteParticipantCount: n
 
 function directRoomID(firstID: string, secondID: string) {
   return `dm:${[firstID, secondID].sort().join(":")}`;
+}
+
+function createCallUUID() {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, value => {
+    const random = Math.floor(Math.random() * 16);
+    const digit = value === "x" ? random : (random & 0x3) | 0x8;
+    return digit.toString(16);
+  });
+}
+
+function normalizeServerURL(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return DEFAULT_API_URL;
+  return trimmed.replace(/\/+$/, "");
 }
 
 async function requestCallPermissions(mode: "voice" | "video") {
@@ -1069,6 +1580,48 @@ const styles = StyleSheet.create({
     fontSize: 17,
     color: "#141b24"
   },
+  googleButton: {
+    minHeight: 54,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#ddd1ff",
+    backgroundColor: "#ffffff",
+    paddingHorizontal: 15,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10
+  },
+  googleButtonText: {
+    color: "#24123d",
+    fontSize: 16,
+    fontWeight: "800"
+  },
+  accountPill: {
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: "#c4b5fd",
+    backgroundColor: "#ede9fe",
+    paddingHorizontal: 14,
+    paddingVertical: 10
+  },
+  accountPillLabel: {
+    color: "#6d28d9",
+    fontSize: 12,
+    fontWeight: "800",
+    textTransform: "uppercase"
+  },
+  accountPillText: {
+    marginTop: 2,
+    color: "#24123d",
+    fontSize: 15,
+    fontWeight: "700"
+  },
+  loginHint: {
+    color: "#5b6472",
+    fontSize: 13,
+    lineHeight: 18
+  },
   primaryButton: {
     minHeight: 54,
     borderRadius: 12,
@@ -1085,6 +1638,31 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#eee9ff"
   },
+  fullScreenCall: {
+    flex: 1,
+    backgroundColor: "#000000"
+  },
+  fullScreenVideoFrame: {
+    flex: 1,
+    backgroundColor: "#000000"
+  },
+  fullScreenVideoPlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#140a24"
+  },
+  fullScreenHangupButton: {
+    position: "absolute",
+    alignSelf: "center",
+    bottom: 34,
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#dc2626"
+  },
   header: {
     minHeight: 76 + TOP_SAFE_AREA_HEIGHT,
     paddingHorizontal: 16,
@@ -1096,6 +1674,8 @@ const styles = StyleSheet.create({
     justifyContent: "space-between"
   },
   identity: {
+    flex: 1,
+    minWidth: 0,
     flexDirection: "row",
     alignItems: "center",
     gap: 12
@@ -1131,7 +1711,8 @@ const styles = StyleSheet.create({
   roomTitle: {
     fontSize: 20,
     fontWeight: "800",
-    color: "#f8fafc"
+    color: "#f8fafc",
+    maxWidth: "100%"
   },
   status: {
     fontSize: 13,
@@ -1140,7 +1721,8 @@ const styles = StyleSheet.create({
   },
   headerActions: {
     flexDirection: "row",
-    gap: 8
+    gap: 8,
+    marginLeft: 10
   },
   iconButton: {
     width: 42,
@@ -1149,6 +1731,16 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#3c245f"
+  },
+  secondaryIconButton: {
+    width: 42,
+    height: 42,
+    borderRadius: 12,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#24123d",
+    borderWidth: 1,
+    borderColor: "#6d46a3"
   },
   incomingCallOverlay: {
     position: "absolute",
@@ -1368,11 +1960,17 @@ const styles = StyleSheet.create({
     borderColor: "#7c3aed",
     backgroundColor: "#ede6ff"
   },
+  privateChatActions: {
+    marginTop: 8,
+    marginHorizontal: 14,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap"
+  },
   homeRoomButton: {
     alignSelf: "flex-start",
     minHeight: 34,
-    marginTop: 8,
-    marginHorizontal: 14,
     borderRadius: 11,
     paddingHorizontal: 12,
     alignItems: "center",
@@ -1381,6 +1979,23 @@ const styles = StyleSheet.create({
   },
   homeRoomText: {
     color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "900"
+  },
+  deleteChatButton: {
+    minHeight: 34,
+    borderRadius: 11,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    backgroundColor: "#ffedd5",
+    borderWidth: 1,
+    borderColor: "#fdba74"
+  },
+  deleteChatText: {
+    color: "#7c2d12",
     fontSize: 12,
     fontWeight: "900"
   },
@@ -1504,6 +2119,9 @@ const styles = StyleSheet.create({
     fontSize: 22
   },
   catMemeRow: {
+    flexGrow: 0,
+    flexShrink: 0,
+    height: 56,
     backgroundColor: "#f7f3ff",
     borderTopWidth: 1,
     borderTopColor: "#e5dcff"
@@ -1511,10 +2129,11 @@ const styles = StyleSheet.create({
   catMemeList: {
     gap: 8,
     paddingHorizontal: 10,
-    paddingBottom: 8
+    paddingVertical: 8,
+    alignItems: "center"
   },
   catMemeButton: {
-    minHeight: 40,
+    height: 40,
     borderRadius: 13,
     paddingHorizontal: 12,
     flexDirection: "row",

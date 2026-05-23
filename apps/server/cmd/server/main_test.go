@@ -47,6 +47,22 @@ func TestLoginRejectsInvalidInvite(t *testing.T) {
 	}
 }
 
+func TestLoginRejectsMissingAccountEmail(t *testing.T) {
+	app := &server{
+		cfg: config{sharedInviteCode: "home"},
+	}
+
+	body, _ := json.Marshal(loginRequest{DisplayName: "Carlos", InviteCode: "home"})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	app.login(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unauthorized, got %d", rec.Code)
+	}
+}
+
 func TestDirectMessageRecipientsAreExplicitPrivateRooms(t *testing.T) {
 	recipients := directMessageRecipients("dm:alice:bob")
 	if len(recipients) != 2 || recipients[0] != "alice" || recipients[1] != "bob" {
@@ -70,6 +86,15 @@ func TestDirectRoomAccessRequiresParticipant(t *testing.T) {
 	}
 }
 
+func TestNormalizeAvatarURLAllowsOnlyHTTPS(t *testing.T) {
+	if got := normalizeAvatarURL(" https://example.com/avatar.png "); got != "https://example.com/avatar.png" {
+		t.Fatalf("expected https avatar URL, got %q", got)
+	}
+	if got := normalizeAvatarURL("http://example.com/avatar.png"); got != "" {
+		t.Fatalf("expected non-https avatar URL to be rejected, got %q", got)
+	}
+}
+
 func TestRetryEventuallySucceeds(t *testing.T) {
 	attempts := 0
 	err := retry(context.Background(), "test", func(context.Context) error {
@@ -85,6 +110,101 @@ func TestRetryEventuallySucceeds(t *testing.T) {
 	}
 	if attempts != 3 {
 		t.Fatalf("expected 3 attempts, got %d", attempts)
+	}
+}
+
+func TestIntegrationLoginUsesEmailAsStableAccount(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home"},
+		db:  db,
+	}
+
+	first := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos",
+		AccountEmail: "Carlos@example.com",
+		AvatarURL:    "https://example.com/carlos.png",
+		InviteCode:   "home",
+	})
+	second := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlitos",
+		AccountEmail: "carlos@example.com",
+		AvatarURL:    "http://example.com/rejected.png",
+		InviteCode:   "home",
+	})
+
+	if first.UserID != second.UserID {
+		t.Fatalf("expected same user id for same email, got %q and %q", first.UserID, second.UserID)
+	}
+	if second.DisplayName != "Carlitos" {
+		t.Fatalf("expected display name update, got %q", second.DisplayName)
+	}
+	if second.AccountEmail != "carlos@example.com" {
+		t.Fatalf("expected normalized account email, got %q", second.AccountEmail)
+	}
+	if first.AvatarURL != "https://example.com/carlos.png" {
+		t.Fatalf("expected https avatar URL on first login, got %q", first.AvatarURL)
+	}
+	if second.AvatarURL != "" {
+		t.Fatalf("expected unsafe avatar URL to be rejected, got %q", second.AvatarURL)
+	}
+}
+
+func TestIntegrationLoginAllowsSameDisplayNameForDifferentEmails(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home"},
+		db:  db,
+	}
+
+	first := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos",
+		AccountEmail: "carlos@example.com",
+		InviteCode:   "home",
+	})
+	second := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos",
+		AccountEmail: "carlitos@example.com",
+		InviteCode:   "home",
+	})
+
+	if first.UserID == second.UserID {
+		t.Fatalf("expected different users for different emails, got %q", first.UserID)
+	}
+	if first.DisplayName != second.DisplayName {
+		t.Fatalf("expected display names to match, got %q and %q", first.DisplayName, second.DisplayName)
 	}
 }
 
@@ -360,6 +480,42 @@ func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
 	if forbiddenRec.Code != http.StatusForbidden {
 		t.Fatalf("expected private history to reject non-participant, got %d", forbiddenRec.Code)
 	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/rooms/"+roomID+"/messages?userId=bob", nil)
+	deleteRouteCtx := chi.NewRouteContext()
+	deleteRouteCtx.URLParams.Add("roomID", roomID)
+	deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), chi.RouteCtxKey, deleteRouteCtx))
+	deleteRec := httptest.NewRecorder()
+	app.deleteMessages(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected direct chat delete ok, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	inboxAfterDeleteReq := httptest.NewRequest(http.MethodGet, "/direct/inbox?userId=bob", nil)
+	inboxAfterDeleteRec := httptest.NewRecorder()
+	app.directInbox(inboxAfterDeleteRec, inboxAfterDeleteReq)
+	if inboxAfterDeleteRec.Code != http.StatusOK {
+		t.Fatalf("expected inbox after delete ok, got %d: %s", inboxAfterDeleteRec.Code, inboxAfterDeleteRec.Body.String())
+	}
+	var inboxAfterDeletePayload struct {
+		Messages []message `json:"messages"`
+	}
+	if err := json.Unmarshal(inboxAfterDeleteRec.Body.Bytes(), &inboxAfterDeletePayload); err != nil {
+		t.Fatalf("decode inbox after delete: %v", err)
+	}
+	if len(inboxAfterDeletePayload.Messages) != 0 {
+		t.Fatalf("expected direct inbox to be empty after delete, got %#v", inboxAfterDeletePayload.Messages)
+	}
+
+	deleteHomeReq := httptest.NewRequest(http.MethodDelete, "/rooms/home/messages?userId=bob", nil)
+	deleteHomeRouteCtx := chi.NewRouteContext()
+	deleteHomeRouteCtx.URLParams.Add("roomID", "home")
+	deleteHomeReq = deleteHomeReq.WithContext(context.WithValue(deleteHomeReq.Context(), chi.RouteCtxKey, deleteHomeRouteCtx))
+	deleteHomeRec := httptest.NewRecorder()
+	app.deleteMessages(deleteHomeRec, deleteHomeReq)
+	if deleteHomeRec.Code != http.StatusBadRequest {
+		t.Fatalf("expected home room delete to be rejected, got %d", deleteHomeRec.Code)
+	}
 }
 
 func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
@@ -598,6 +754,25 @@ func resetIntegrationState(t *testing.T, ctx context.Context, db *pgxpool.Pool) 
 	if _, err := db.Exec(ctx, `truncate table messages, users cascade`); err != nil {
 		t.Fatalf("reset integration state: %v", err)
 	}
+}
+
+func loginForTest(t *testing.T, app *server, payload loginRequest) loginResponse {
+	t.Helper()
+	body, _ := json.Marshal(payload)
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	app.login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected login ok, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var response loginResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode login response: %v", err)
+	}
+	return response
 }
 
 func dialTestWebSocket(t *testing.T, serverURL, roomID, userID, displayName string) *websocket.Conn {

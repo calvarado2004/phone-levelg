@@ -4,9 +4,11 @@ test("login screen is presentable on mobile viewport", async ({ page }) => {
   await page.goto("/?screen=login");
 
   await expect(page.getByText("Phone LevelG")).toBeVisible();
-  await expect(page.getByPlaceholder("Name")).toBeVisible();
-  await expect(page.getByPlaceholder("Invite code")).toBeVisible();
-  await expect(page.getByText("Join")).toBeVisible();
+  await expect(page.getByPlaceholder("Google email")).toBeVisible();
+  await expect(page.getByPlaceholder("Display name")).toBeVisible();
+  await expect(page.getByPlaceholder("Server URL")).toBeVisible();
+  await expect(page.getByPlaceholder("Server secret")).toBeVisible();
+  await expect(page.getByText("Connect")).toBeVisible();
 
   await expect(page).toHaveScreenshot("login-screen.png", {
     fullPage: true,
@@ -22,8 +24,8 @@ test("chat screen renders messages, emoji row, and call actions", async ({ page 
   await expect(page.getByText("On my way 🎉")).toBeVisible();
   await expect(page.getByText("😂")).toBeVisible();
 
-  await page.getByRole("button").nth(0).click();
-  await expect(page.getByText("Encrypted room call")).toBeVisible();
+  await page.getByLabel("Start voice call in Home").click();
+  await expect(page.getByText("Encrypted voice call")).toBeVisible();
 
   await expect(page).toHaveScreenshot("chat-screen.png", {
     fullPage: true,

@@ -45,7 +45,7 @@ MongoDB is not deployed. The MVP does not need a document database, and keeping 
 iOS / Android app
   |
   | HTTPS
-  |   - login
+  |   - Google-email + invite-code login
   |   - message history
   |   - LiveKit token requests
   |
@@ -82,11 +82,19 @@ The mobile app lives in `apps/mobile`.
 It provides:
 
 - invite-code login
+- Google email identity decoupled from the backend server secret
+- 30-day local session persistence
+- logout from the mobile header
+- user avatars from Google profile photos, with initials fallback
 - joined-member lobby backed by Postgres
-- a private `Home` room
+- shared `Home` lobby room
+- private 1-1 chats between members
+- private-chat deletion from the selected direct conversation
 - real-time messages over WebSocket
 - emoji quick actions
+- compact cat meme quick messages
 - call buttons for LiveKit-backed voice/video rooms
+- incoming-call UI while the app is active, using the platform sound path
 - native Android and iOS projects for IDE/device builds
 
 Important environment variables:
@@ -94,9 +102,23 @@ Important environment variables:
 ```sh
 EXPO_PUBLIC_API_URL=https://your-private-api-host
 EXPO_PUBLIC_LIVEKIT_URL=wss://your-private-livekit-host
+EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=your-android-oauth-client-id
+EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=your-ios-oauth-client-id
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=your-web-oauth-client-id
 ```
 
-For local development, defaults are:
+The login screen keeps these pieces separate:
+
+- Google email: the stable account key.
+- Display name: presentation only.
+- Server URL: the backend to connect to, defaulting to the private OpenShift route.
+- Server secret: the backend invite code.
+
+User identity is keyed by normalized `accountEmail`, not by display name. Multiple users can share the same display name without colliding. Re-login with the same email updates the existing member row, display name, avatar URL, and `last_seen_at`.
+
+The lobby only lists members. It does not list private 1-1 rooms. Direct room IDs are derived from the two user IDs as `dm:{userA}:{userB}` with sorted IDs, so both devices address the same private conversation. Backend access checks require the requesting user to be one of those two participants before returning direct-message history or accepting direct-message writes.
+
+For local development, the server URL can be changed directly in the app login screen. Emulator/simulator backend defaults are still useful when building with local environment variables:
 
 ```text
 EXPO_PUBLIC_API_URL=http://localhost:4000
@@ -131,9 +153,12 @@ The backend lives in `apps/server` and is built with Go 1.26.
 Responsibilities:
 
 - validate invite-code login
-- create users
+- create and update users by normalized account email
+- allow duplicate display names across different emails
 - persist messages in Postgres
 - return room history
+- keep 1-1 rooms private to their two members
+- delete a direct chat history on request from either participant
 - accept WebSocket connections
 - publish/subscribe room events through Redis
 - mint LiveKit room tokens
@@ -179,6 +204,8 @@ Current network plan:
 The OpenShift service receives a MetalLB IP from the libvirt network. The host runs a small `socat` forwarder from `192.168.1.88` to that MetalLB IP; see `deploy/openshift/livekit-host-forward.sh`.
 
 The app/backend integration point is already present: the backend issues LiveKit JWTs from `/calls/token`.
+
+The current app keeps calls in the foreground app experience. Native full-screen incoming calls while the app is suspended still require production push infrastructure: APNs/PushKit plus CallKit on iOS, and FCM plus high-priority notifications or ConnectionService on Android.
 
 ## Local Development
 
@@ -304,18 +331,33 @@ Checks backend dependencies and returns:
 
 ### `POST /login`
 
-Creates a simple session identity after invite-code validation.
+Creates or updates a session identity after invite-code validation. `accountEmail` is the stable account key; `displayName` is presentation-only.
 
 ```json
 {
   "displayName": "User",
+  "accountEmail": "user@example.com",
   "inviteCode": "home"
 }
 ```
 
+Two users may have the same `displayName` if their `accountEmail` values are different.
+
 ### `GET /rooms/{roomID}/messages`
 
 Returns the latest room messages in chronological order.
+
+For direct rooms, pass `?userId=...`; non-participants receive `403`.
+
+### `DELETE /rooms/{roomID}/messages`
+
+Deletes a direct chat history when called by one of its two participants:
+
+```text
+DELETE /rooms/dm:{userA}:{userB}/messages?userId={userA}
+```
+
+Lobby room deletion is rejected.
 
 ### `GET /members`
 
@@ -364,6 +406,9 @@ npm run test:screens
 What the tests cover:
 
 - Go backend unit behavior
+- email-keyed login and duplicate display-name regression coverage
+- direct-room privacy checks
+- direct-chat deletion behavior
 - dependency startup retry behavior
 - TypeScript correctness
 - OpenShift manifest structure
@@ -382,6 +427,14 @@ Integration tests that require live Postgres and Redis are opt-in:
 INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' \
 INTEGRATION_REDIS_ADDR='localhost:6379' \
 go test ./apps/server/... -run Integration
+```
+
+The login-specific integration subset is useful before deploying identity changes:
+
+```sh
+INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' \
+INTEGRATION_REDIS_ADDR='localhost:6379' \
+go test ./apps/server/... -run 'TestIntegrationLogin'
 ```
 
 ## Privacy Notes

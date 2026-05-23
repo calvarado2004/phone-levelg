@@ -4,8 +4,11 @@ Go backend for the private messaging and call-token API.
 
 ## Responsibilities
 
-- Login through a shared invite code.
+- Login through a Google email account plus a shared invite code.
+- Reuse users by normalized email while allowing duplicate display names.
 - Store users, joined members, and messages in Postgres.
+- Keep direct chat rooms private to their two participants.
+- Delete direct chat history when requested by a participant.
 - Broadcast live chat, member join, and call events through Redis pub/sub.
 - Mint LiveKit room tokens for voice/video calls.
 - Expose health checks for OpenShift probes.
@@ -23,6 +26,7 @@ Request:
 ```json
 {
   "displayName": "Carlos",
+  "accountEmail": "carlos@example.com",
   "inviteCode": "home"
 }
 ```
@@ -32,13 +36,22 @@ Response:
 ```json
 {
   "userId": "generated-id",
-  "displayName": "Carlos"
+  "displayName": "Carlos",
+  "accountEmail": "carlos@example.com"
 }
 ```
+
+`accountEmail` is the stable account key. `displayName` is presentation-only and can change without creating a second member. Different email accounts may use the same display name. The invite code remains the backend-specific server secret.
 
 ### `GET /rooms/{roomID}/messages`
 
 Returns the latest 200 messages for a room in chronological order.
+
+For 1-1 rooms (`dm:{userA}:{userB}`), callers must include `?userId=...`; only the two room members can read the history.
+
+### `DELETE /rooms/{roomID}/messages?userId=...`
+
+Deletes all messages in a 1-1 room and publishes a `message:clear` event to both members. Lobby room deletion is rejected so shared history is not removed accidentally.
 
 ### `GET /members`
 
@@ -92,6 +105,18 @@ Member join broadcast event:
 
 Mints a LiveKit JWT for a room.
 
+## Identity and Privacy
+
+The backend does not use display names as identifiers. Login normalizes `accountEmail`, updates an existing row when that email already exists, and creates a new row only for a new email. This avoids duplicate-account errors when two users choose the same name.
+
+Direct rooms use this format:
+
+```text
+dm:{lowerUserID}:{higherUserID}
+```
+
+The mobile client sorts the two user IDs before constructing the room ID, so both devices address the same room. The backend checks that `userId` is one of the two participants before returning history, accepting messages, or deleting that room history.
+
 ## State
 
 - Postgres is the durable system of record.
@@ -112,4 +137,12 @@ Integration tests are opt-in and require real Postgres and Redis endpoints:
 INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' \
 INTEGRATION_REDIS_ADDR='localhost:6379' \
 go test ./apps/server/... -run Integration
+```
+
+The login-specific regression subset is:
+
+```sh
+INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' \
+INTEGRATION_REDIS_ADDR='localhost:6379' \
+go test ./apps/server/... -run 'TestIntegrationLogin'
 ```

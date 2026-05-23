@@ -15,7 +15,6 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"github.com/gorilla/websocket"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/livekit/protocol/auth"
 	"github.com/redis/go-redis/v9"
@@ -39,18 +38,23 @@ type server struct {
 }
 
 type loginRequest struct {
-	DisplayName string `json:"displayName"`
-	InviteCode  string `json:"inviteCode"`
+	DisplayName  string `json:"displayName"`
+	AccountEmail string `json:"accountEmail"`
+	AvatarURL    string `json:"avatarURL"`
+	InviteCode   string `json:"inviteCode"`
 }
 
 type loginResponse struct {
-	UserID      string `json:"userId"`
-	DisplayName string `json:"displayName"`
+	UserID       string `json:"userId"`
+	DisplayName  string `json:"displayName"`
+	AccountEmail string `json:"accountEmail"`
+	AvatarURL    string `json:"avatarURL,omitempty"`
 }
 
 type member struct {
 	ID          string    `json:"id"`
 	DisplayName string    `json:"displayName"`
+	AvatarURL   string    `json:"avatarURL,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	LastSeenAt  time.Time `json:"lastSeenAt"`
 }
@@ -130,7 +134,7 @@ func main() {
 	router := chi.NewRouter()
 	router.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{cfg.corsOrigin},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -142,6 +146,7 @@ func main() {
 	router.Get("/direct/inbox", app.directInbox)
 	router.Get("/rooms/{roomID}/messages", app.messages)
 	router.Post("/rooms/{roomID}/messages", app.createMessage)
+	router.Delete("/rooms/{roomID}/messages", app.deleteMessages)
 	router.Post("/calls/token", app.callToken)
 	router.Get("/ws", app.websocket)
 
@@ -196,12 +201,16 @@ func migrate(ctx context.Context, db *pgxpool.Pool) error {
 	_, err := db.Exec(ctx, `
 create table if not exists users (
   id text primary key,
+  account_email text,
   display_name text not null,
   created_at timestamptz not null default now(),
   last_seen_at timestamptz not null default now()
 );
 
+alter table users add column if not exists account_email text;
+alter table users add column if not exists avatar_url text not null default '';
 alter table users add column if not exists last_seen_at timestamptz not null default now();
+create unique index if not exists users_account_email_lower_idx on users (lower(account_email)) where account_email is not null;
 
 create table if not exists messages (
   id text primary key,
@@ -242,7 +251,7 @@ with ranked_users as (
 delete from users
 where id in (select id from ranked_users where rank > 1);
 
-create unique index if not exists users_display_name_lower_idx on users(lower(display_name));
+drop index if exists users_display_name_lower_idx;
 create index if not exists messages_room_created_idx on messages(room_id, created_at);
 create index if not exists users_last_seen_idx on users(last_seen_at desc);
 `)
@@ -270,40 +279,47 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.AccountEmail = strings.ToLower(strings.TrimSpace(req.AccountEmail))
+	req.AvatarURL = normalizeAvatarURL(req.AvatarURL)
 	req.InviteCode = strings.TrimSpace(req.InviteCode)
-	if req.DisplayName == "" || len(req.DisplayName) > 40 || req.InviteCode != s.cfg.sharedInviteCode {
+	if req.DisplayName == "" ||
+		len(req.DisplayName) > 40 ||
+		req.AccountEmail == "" ||
+		len(req.AccountEmail) > 254 ||
+		!strings.Contains(req.AccountEmail, "@") ||
+		req.InviteCode != s.cfg.sharedInviteCode {
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid invite"})
 		return
 	}
 
-	var userID string
+	userID := randomID()
 	err := s.db.QueryRow(r.Context(), `
-select id
-from users
-where lower(display_name) = lower($1)
-order by last_seen_at desc, created_at desc
-limit 1`, req.DisplayName).Scan(&userID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		userID = randomID()
-		_, err = s.db.Exec(r.Context(), `insert into users (id, display_name) values ($1, $2)`, userID, req.DisplayName)
-	}
-	if err == nil {
-		_, err = s.db.Exec(r.Context(), `
-update users
-set display_name = $2, last_seen_at = now()
-where id = $1`, userID, req.DisplayName)
-	}
+with existing as (
+  update users
+  set account_email = $1, display_name = $2, avatar_url = $3, last_seen_at = now()
+  where lower(account_email) = lower($1)
+  returning id
+), inserted as (
+  insert into users (id, account_email, display_name, avatar_url)
+  select $4, $1, $2, $3
+  where not exists (select 1 from existing)
+  returning id
+)
+select id from existing
+union all
+select id from inserted
+limit 1`, req.AccountEmail, req.DisplayName, req.AvatarURL, userID).Scan(&userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create user failed"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, loginResponse{UserID: userID, DisplayName: req.DisplayName})
+	writeJSON(w, http.StatusOK, loginResponse{UserID: userID, DisplayName: req.DisplayName, AccountEmail: req.AccountEmail, AvatarURL: req.AvatarURL})
 }
 
 func (s *server) members(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
-select id, display_name, created_at, last_seen_at
+select id, display_name, avatar_url, created_at, last_seen_at
 from users
 order by last_seen_at desc, created_at desc
 limit 100`)
@@ -316,7 +332,7 @@ limit 100`)
 	members := make([]member, 0)
 	for rows.Next() {
 		var item member
-		if err := rows.Scan(&item.ID, &item.DisplayName, &item.CreatedAt, &item.LastSeenAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.AvatarURL, &item.CreatedAt, &item.LastSeenAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan members failed"})
 			return
 		}
@@ -422,6 +438,36 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
+}
+
+func (s *server) deleteMessages(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
+	if roomID == "" || userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room and user required"})
+		return
+	}
+	if len(directMessageRecipients(roomID)) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "only direct chats can be deleted"})
+		return
+	}
+	if !canAccessRoom(roomID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	tag, err := s.db.Exec(r.Context(), `delete from messages where room_id = $1`, roomID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete messages failed"})
+		return
+	}
+
+	envelope := outboundEnvelope{Type: "message:clear", Data: map[string]string{"roomId": roomID, "senderId": userID}}
+	for _, recipient := range directMessageRecipients(roomID) {
+		s.publish(r.Context(), "user:"+recipient, envelope)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": tag.RowsAffected()})
 }
 
 func (s *server) callToken(w http.ResponseWriter, r *http.Request) {
@@ -675,6 +721,17 @@ func canAccessRoom(roomID, userID string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAvatarURL(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) > 512 {
+		return ""
+	}
+	if strings.HasPrefix(value, "https://") {
+		return value
+	}
+	return ""
 }
 
 func (s *server) publish(ctx context.Context, channel string, envelope outboundEnvelope) {
