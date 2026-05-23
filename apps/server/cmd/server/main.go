@@ -565,6 +565,27 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 				},
 			}
 			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
+		case "call:reject":
+			var body struct {
+				RoomID string `json:"roomId"`
+			}
+			_ = json.Unmarshal(envelope.Data, &body)
+			targetRoomID := strings.TrimSpace(body.RoomID)
+			if targetRoomID == "" {
+				targetRoomID = roomID
+			}
+			if !canAccessRoom(targetRoomID, userID) {
+				continue
+			}
+			envelope := outboundEnvelope{
+				Type: "call:reject",
+				Data: map[string]string{
+					"roomId":   targetRoomID,
+					"senderId": userID,
+					"sender":   displayName,
+				},
+			}
+			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
 		}
 	}
 }

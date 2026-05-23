@@ -1,8 +1,9 @@
 import "react-native-get-random-values";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
-import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from "expo-audio";
+import { createAudioPlayer, setAudioModeAsync, setIsAudioActiveAsync, type AudioPlayer } from "expo-audio";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { registerGlobals } from "@livekit/react-native";
+import { RTCView } from "@livekit/react-native-webrtc";
 import {
   Alert,
   FlatList,
@@ -19,12 +20,13 @@ import {
   Vibration,
   View
 } from "react-native";
-import { Room, RoomEvent } from "livekit-client";
+import { Room, RoomEvent, isVideoTrack, type VideoTrack as LiveKitVideoTrack } from "livekit-client";
 import {
   Phone,
   PhoneOff,
   SendHorizontal,
   Smile,
+  SwitchCamera,
   Users,
   Video
 } from "lucide-react-native";
@@ -74,6 +76,7 @@ type SocketEvent =
   | { type: "message:new"; data: Message }
   | { type: "call:ring"; data: { roomId: string; senderId: string; sender: string; mode?: "voice" | "video" } }
   | { type: "call:end"; data: { roomId: string; senderId: string; sender: string } }
+  | { type: "call:reject"; data: { roomId: string; senderId: string; sender: string } }
   | { type: "member:joined"; data: Member };
 
 const QUICK_EMOJIS = ["👍", "😂", "❤️", "🔥", "🎉", "👀"];
@@ -118,6 +121,9 @@ export default function App() {
   const [unreadRoomIDs, setUnreadRoomIDs] = useState<string[]>([]);
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [callMode, setCallMode] = useState<"voice" | "video">("voice");
+  const [localVideoTrack, setLocalVideoTrack] = useState<LiveKitVideoTrack | undefined>();
+  const [remoteVideoTrack, setRemoteVideoTrack] = useState<LiveKitVideoTrack | undefined>();
+  const [cameraDeviceID, setCameraDeviceID] = useState<string | undefined>();
   const socketRef = useRef<WebSocket | null>(null);
   const roomRef = useRef<Room | null>(null);
   const activeCallRoomIDRef = useRef<string | null>(null);
@@ -130,6 +136,7 @@ export default function App() {
   }, [selectedMember, session]);
   const activeRoomTitle = selectedMember?.displayName ?? "Home";
   const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
+  const displayedVideoTrack = remoteVideoTrack ?? localVideoTrack;
 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
@@ -217,10 +224,18 @@ export default function App() {
       }
       if (payload.type === "call:end" && payload.data.senderId !== session.userId) {
         if (incomingCallRef.current?.roomId === payload.data.roomId) {
-          void declineIncomingCall();
+          void declineIncomingCall({ announce: false });
         }
         if (activeCallRoomIDRef.current === payload.data.roomId) {
           void endCurrentCall({ announce: false, status: "Call ended" });
+        }
+      }
+      if (payload.type === "call:reject" && payload.data.senderId !== session.userId) {
+        if (incomingCallRef.current?.roomId === payload.data.roomId) {
+          void declineIncomingCall({ announce: false });
+        }
+        if (activeCallRoomIDRef.current === payload.data.roomId) {
+          void endCurrentCall({ announce: false, status: "Call rejected" });
         }
       }
       if (payload.type === "member:joined") {
@@ -301,7 +316,7 @@ export default function App() {
 
   async function joinCall(mode: "voice" | "video", roomID = activeRoomID, announce = true) {
     if (!session) return;
-    await stopIncomingCallTone();
+    await stopIncomingCallTone({ deactivateAudio: false });
     if (roomRef.current) {
       await endCurrentCall({ announce: false, status: "Switching call" });
     }
@@ -351,10 +366,24 @@ export default function App() {
       room.on(RoomEvent.ParticipantConnected, () => {
         setRemoteParticipantCount(room.remoteParticipants.size);
         setCallStatus("Connected");
+        syncVideoTracks(room);
       });
       room.on(RoomEvent.ParticipantDisconnected, () => {
         setRemoteParticipantCount(room.remoteParticipants.size);
         setCallStatus(room.remoteParticipants.size > 0 ? "Connected" : "Waiting for other person");
+        syncVideoTracks(room);
+      });
+      room.on(RoomEvent.TrackSubscribed, () => {
+        syncVideoTracks(room);
+      });
+      room.on(RoomEvent.TrackUnsubscribed, () => {
+        syncVideoTracks(room);
+      });
+      room.on(RoomEvent.LocalTrackPublished, () => {
+        syncVideoTracks(room);
+      });
+      room.on(RoomEvent.LocalTrackUnpublished, () => {
+        syncVideoTracks(room);
       });
       room.on(RoomEvent.Reconnecting, () => {
         setCallStatus("Reconnecting");
@@ -374,7 +403,12 @@ export default function App() {
       await room.localParticipant.setMicrophoneEnabled(true);
       if (mode === "video") {
         try {
-          await room.localParticipant.setCameraEnabled(true);
+          const cameraPublication = await room.localParticipant.setCameraEnabled(true, { facingMode: "user" });
+          if (isVideoTrack(cameraPublication?.track)) {
+            setLocalVideoTrack(cameraPublication.track);
+          }
+          await loadCameraDevice(room);
+          syncVideoTracks(room);
         } catch {
           setCallMode("voice");
           Alert.alert("Video unavailable", "The call is connected with audio. Camera publishing failed on this device.");
@@ -402,17 +436,27 @@ export default function App() {
     if (room) {
       await room.localParticipant.setCameraEnabled(false).catch(() => undefined);
       await room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
-      await room.disconnect().catch(() => undefined);
+      await stopPublishedMedia(room);
+      await room.disconnect(true).catch(() => undefined);
       room.removeAllListeners();
     }
+    setLocalVideoTrack(undefined);
+    setRemoteVideoTrack(undefined);
+    setCameraDeviceID(undefined);
+    await resetAudioSession();
     setCallActive(false);
     setCallStatus(status);
     setRemoteParticipantCount(0);
   }
 
-  async function declineIncomingCall() {
+  async function declineIncomingCall(options: { announce?: boolean } = {}) {
+    const call = incomingCallRef.current;
+    if (options.announce !== false && call) {
+      sendSocket("call:reject", { roomId: call.roomId });
+    }
     await stopIncomingCallTone();
     setIncomingCall(null);
+    incomingCallRef.current = null;
   }
 
   async function acceptIncomingCall() {
@@ -426,7 +470,9 @@ export default function App() {
     Vibration.vibrate([0, 750, 350], true);
     if (ringtoneRef.current) return;
     try {
+      await setIsAudioActiveAsync(true);
       await setAudioModeAsync({
+        allowsRecording: false,
         playsInSilentMode: true,
         interruptionMode: "doNotMix",
         shouldPlayInBackground: false,
@@ -444,17 +490,108 @@ export default function App() {
     }
   }
 
-  async function stopIncomingCallTone() {
+  async function stopIncomingCallTone(options: { deactivateAudio?: boolean } = {}) {
     Vibration.cancel();
     const player = ringtoneRef.current;
     ringtoneRef.current = null;
-    if (!player) return;
-    try {
-      player.pause();
-      player.remove();
-    } catch {
-      // The player may already be released during reloads or navigation.
+    if (player) {
+      try {
+        player.pause();
+        player.remove();
+      } catch {
+        // The player may already be released during reloads or navigation.
+      }
     }
+    if (options.deactivateAudio !== false) {
+      await resetAudioSession();
+    }
+  }
+
+  async function resetAudioSession() {
+    try {
+      await setAudioModeAsync({
+        allowsRecording: false,
+        playsInSilentMode: true,
+        interruptionMode: "mixWithOthers",
+        shouldPlayInBackground: false,
+        shouldRouteThroughEarpiece: false
+      });
+      await setIsAudioActiveAsync(false);
+    } catch {
+      // Audio session reset is best-effort; media tracks are stopped separately.
+    }
+  }
+
+  function syncVideoTracks(room: Room) {
+    const localCameraTrack = Array.from(room.localParticipant.videoTrackPublications.values())
+      .map(publication => publication.track)
+      .find(isVideoTrack);
+    const nextLocalVideoTrack = isVideoTrack(localCameraTrack) ? localCameraTrack : undefined;
+    let nextRemoteVideoTrack: LiveKitVideoTrack | undefined;
+    for (const participant of room.remoteParticipants.values()) {
+      const remoteCameraTrack = Array.from(participant.videoTrackPublications.values())
+        .map(publication => publication.track)
+        .find(isVideoTrack);
+      if (isVideoTrack(remoteCameraTrack)) {
+        nextRemoteVideoTrack = remoteCameraTrack;
+        break;
+      }
+    }
+
+    setLocalVideoTrack(nextLocalVideoTrack);
+    setRemoteVideoTrack(nextRemoteVideoTrack);
+  }
+
+  async function loadCameraDevice(room: Room) {
+    const currentDevice = room.getActiveDevice("videoinput");
+    if (currentDevice) {
+      setCameraDeviceID(currentDevice);
+      return;
+    }
+    const devices = await Room.getLocalDevices("videoinput", false).catch(() => []);
+    setCameraDeviceID(devices[0]?.deviceId);
+  }
+
+  async function flipCamera() {
+    const room = roomRef.current;
+    if (!room || callMode !== "video") return;
+    const devices = await Room.getLocalDevices("videoinput", true).catch(() => []);
+    if (devices.length < 2) {
+      Alert.alert("Camera unavailable", "This device did not report a second camera.");
+      return;
+    }
+
+    const activeDeviceID = cameraDeviceID ?? room.getActiveDevice("videoinput") ?? devices[0]?.deviceId;
+    const activeIndex = Math.max(0, devices.findIndex(device => device.deviceId === activeDeviceID));
+    const nextDevice = devices[(activeIndex + 1) % devices.length];
+    if (!nextDevice) return;
+
+    try {
+      await room.switchActiveDevice("videoinput", nextDevice.deviceId);
+      setCameraDeviceID(nextDevice.deviceId);
+      syncVideoTracks(room);
+    } catch {
+      Alert.alert("Camera unavailable", "The app could not switch to the other camera.");
+    }
+  }
+
+  async function stopPublishedMedia(room: Room) {
+    const localTracks = Array.from(room.localParticipant.trackPublications.values())
+      .map(publication => publication.track)
+      .filter((track): track is NonNullable<typeof track> => Boolean(track));
+
+    await Promise.all(localTracks.map(track => room.localParticipant.unpublishTrack(track, true).catch(() => undefined)));
+    localTracks.forEach(track => {
+      track.detach();
+      track.stop();
+      track.mediaStreamTrack.stop();
+    });
+
+    room.remoteParticipants.forEach(participant => {
+      participant.trackPublications.forEach(publication => {
+        publication.track?.stop();
+      });
+    });
   }
 
   if (!session) {
@@ -549,13 +686,43 @@ export default function App() {
               <Text style={styles.incomingHint}>Phone LevelG</Text>
             </View>
             <View style={styles.incomingActions}>
-              <Pressable style={[styles.callActionButton, styles.declineButton]} onPress={declineIncomingCall}>
+              <Pressable style={[styles.callActionButton, styles.declineButton]} onPress={() => void declineIncomingCall()}>
                 <PhoneOff color="#ffffff" size={24} />
               </Pressable>
               <Pressable style={[styles.callActionButton, styles.acceptButton]} onPress={acceptIncomingCall}>
                 <Phone color="#ffffff" size={24} />
               </Pressable>
             </View>
+          </View>
+        )}
+
+        {callActive && callMode === "video" && (
+          <View style={styles.videoCallStage}>
+            <View style={styles.remoteVideoFrame}>
+              {displayedVideoTrack ? (
+                <CameraStreamView key={displayedVideoTrack.sid} track={displayedVideoTrack} mirror={!remoteVideoTrack} zOrder={0} />
+              ) : (
+                <View style={styles.videoPlaceholder}>
+                  <Video color="#c4b5fd" size={32} />
+                  <Text style={styles.videoPlaceholderTitle}>Starting camera</Text>
+                  <Text style={styles.videoPlaceholderText}>Camera preview will appear here.</Text>
+                </View>
+              )}
+            </View>
+            {remoteVideoTrack && localVideoTrack && (
+              <View style={styles.localVideoFrame}>
+                <CameraStreamView key={localVideoTrack.sid} track={localVideoTrack} mirror zOrder={1} />
+              </View>
+            )}
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Switch camera"
+              hitSlop={12}
+              style={styles.flipCameraButton}
+              onPress={() => void flipCamera()}
+            >
+              <SwitchCamera color="#ffffff" size={20} />
+            </Pressable>
           </View>
         )}
 
@@ -668,6 +835,33 @@ export default function App() {
         </View>
       </KeyboardAvoidingView>
     </SafeAreaView>
+  );
+}
+
+function CameraStreamView({ track, mirror, zOrder }: { track: LiveKitVideoTrack; mirror?: boolean; zOrder?: number }) {
+  const [streamURL, setStreamURL] = useState("");
+
+  useEffect(() => {
+    const mediaStream = track.mediaStream as unknown as { toURL?: () => string } | undefined;
+    setStreamURL(mediaStream?.toURL?.() ?? "");
+  }, [track]);
+
+  if (!streamURL) {
+    return (
+      <View style={styles.localVideoFallback}>
+        <Video color="#ffffff" size={20} />
+      </View>
+    );
+  }
+
+  return (
+    <RTCView
+      streamURL={streamURL}
+      style={styles.videoView}
+      objectFit="cover"
+      mirror={mirror}
+      zOrder={zOrder}
+    />
   );
 }
 
@@ -972,6 +1166,69 @@ const styles = StyleSheet.create({
   },
   acceptButton: {
     backgroundColor: "#16a34a"
+  },
+  videoCallStage: {
+    marginHorizontal: 12,
+    marginTop: 12,
+    height: 260,
+    borderRadius: 16,
+    overflow: "hidden",
+    backgroundColor: "#140a24"
+  },
+  remoteVideoFrame: {
+    flex: 1,
+    backgroundColor: "#140a24"
+  },
+  videoView: {
+    flex: 1
+  },
+  videoPlaceholder: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+    backgroundColor: "#24123d"
+  },
+  videoPlaceholderTitle: {
+    color: "#ffffff",
+    fontSize: 16,
+    fontWeight: "800",
+    marginTop: 12
+  },
+  videoPlaceholderText: {
+    color: "#c4b5fd",
+    fontSize: 13,
+    fontWeight: "600",
+    marginTop: 4
+  },
+  localVideoFrame: {
+    position: "absolute",
+    right: 12,
+    bottom: 12,
+    width: 108,
+    height: 148,
+    borderRadius: 14,
+    overflow: "hidden",
+    borderWidth: 2,
+    borderColor: "#ffffff",
+    backgroundColor: "#7c3aed"
+  },
+  localVideoFallback: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#7c3aed"
+  },
+  flipCameraButton: {
+    position: "absolute",
+    left: 12,
+    bottom: 12,
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(36, 18, 61, 0.88)"
   },
   callBanner: {
     margin: 12,

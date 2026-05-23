@@ -562,6 +562,35 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 	if endPayload.RoomID != "home" || endPayload.SenderID != "alice" {
 		t.Fatalf("unexpected end payload: %#v", endPayload)
 	}
+
+	if err := bob.WriteJSON(wsEnvelope{
+		Type: "call:reject",
+		Data: json.RawMessage(`{"roomId":"home"}`),
+	}); err != nil {
+		t.Fatalf("send lobby call reject: %v", err)
+	}
+
+	var rejected outboundEnvelope
+	if err := alice.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set alice reject deadline: %v", err)
+	}
+	if err := alice.ReadJSON(&rejected); err != nil {
+		t.Fatalf("alice did not receive lobby call rejection on user channel: %v", err)
+	}
+	if rejected.Type != "call:reject" {
+		t.Fatalf("expected call:reject, got %q", rejected.Type)
+	}
+	var rejectPayload struct {
+		RoomID   string `json:"roomId"`
+		SenderID string `json:"senderId"`
+	}
+	encodedRejectPayload, _ := json.Marshal(rejected.Data)
+	if err := json.Unmarshal(encodedRejectPayload, &rejectPayload); err != nil {
+		t.Fatalf("decode reject payload: %v", err)
+	}
+	if rejectPayload.RoomID != "home" || rejectPayload.SenderID != "bob" {
+		t.Fatalf("unexpected reject payload: %#v", rejectPayload)
+	}
 }
 
 func resetIntegrationState(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
