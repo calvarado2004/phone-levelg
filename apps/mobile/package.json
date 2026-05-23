@@ -1,0 +1,32 @@
+{
+  "name": "@phone-levelg/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo/AppEntry.js",
+  "scripts": {
+    "start": "expo start",
+    "android": "expo run:android",
+    "android:openshift": "EXPO_PUBLIC_API_URL=https://phone-levelg-server-phone-levelg.apps.ocp-think.levelg.io EXPO_PUBLIC_LIVEKIT_URL=ws://192.168.1.88:7880 expo run:android",
+    "ios": "expo run:ios",
+    "ios:openshift": "EXPO_PUBLIC_API_URL=https://phone-levelg-server-phone-levelg.apps.ocp-think.levelg.io EXPO_PUBLIC_LIVEKIT_URL=ws://192.168.1.88:7880 expo run:ios",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@livekit/react-native": "latest",
+    "expo": "latest",
+    "expo-audio": "~56.0.10",
+    "expo-status-bar": "latest",
+    "livekit-client": "latest",
+    "lucide-react-native": "latest",
+    "react": "latest",
+    "react-dom": "^19.2.6",
+    "react-native": "latest",
+    "react-native-get-random-values": "latest",
+    "react-native-svg": "latest",
+    "react-native-web": "^0.21.2"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "typescript": "latest"
+  }
+}

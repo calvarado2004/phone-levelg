@@ -1,0 +1,10 @@
+node_modules/
+.expo/
+.idea/
+test-results/
+playwright-report/
+dist/
+build/
+.DS_Store
+*.log
+.env

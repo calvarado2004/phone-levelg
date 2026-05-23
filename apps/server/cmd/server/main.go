@@ -1,0 +1,660 @@
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/cors"
+	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/livekit/protocol/auth"
+	"github.com/redis/go-redis/v9"
+)
+
+type config struct {
+	port             string
+	corsOrigin       string
+	sharedInviteCode string
+	databaseURL      string
+	redisAddr        string
+	livekitAPIKey    string
+	livekitAPISecret string
+}
+
+type server struct {
+	cfg      config
+	db       *pgxpool.Pool
+	redis    *redis.Client
+	upgrader websocket.Upgrader
+}
+
+type loginRequest struct {
+	DisplayName string `json:"displayName"`
+	InviteCode  string `json:"inviteCode"`
+}
+
+type loginResponse struct {
+	UserID      string `json:"userId"`
+	DisplayName string `json:"displayName"`
+}
+
+type member struct {
+	ID          string    `json:"id"`
+	DisplayName string    `json:"displayName"`
+	CreatedAt   time.Time `json:"createdAt"`
+	LastSeenAt  time.Time `json:"lastSeenAt"`
+}
+
+type message struct {
+	ID        string    `json:"id"`
+	RoomID    string    `json:"roomId"`
+	SenderID  string    `json:"senderId"`
+	Sender    string    `json:"sender"`
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type callTokenRequest struct {
+	RoomID      string `json:"roomId"`
+	Identity    string `json:"identity"`
+	DisplayName string `json:"displayName"`
+}
+
+type createMessageRequest struct {
+	SenderID    string `json:"senderId"`
+	DisplayName string `json:"displayName"`
+	Text        string `json:"text"`
+}
+
+type wsEnvelope struct {
+	Type string          `json:"type"`
+	Data json.RawMessage `json:"data,omitempty"`
+}
+
+type outboundEnvelope struct {
+	Type string `json:"type"`
+	Data any    `json:"data,omitempty"`
+}
+
+func main() {
+	ctx := context.Background()
+	cfg := loadConfig()
+
+	db, err := pgxpool.New(ctx, cfg.databaseURL)
+	if err != nil {
+		slog.Error("connect postgres", "error", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	if err := retry(ctx, "postgres migration", func(ctx context.Context) error {
+		if err := db.Ping(ctx); err != nil {
+			return err
+		}
+		return migrate(ctx, db)
+	}); err != nil {
+		slog.Error("migrate postgres", "error", err)
+		os.Exit(1)
+	}
+
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.redisAddr})
+	if err := retry(ctx, "redis ping", func(ctx context.Context) error {
+		return rdb.Ping(ctx).Err()
+	}); err != nil {
+		slog.Error("connect redis", "error", err)
+		os.Exit(1)
+	}
+	defer rdb.Close()
+
+	app := &server{
+		cfg:   cfg,
+		db:    db,
+		redis: rdb,
+		upgrader: websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool {
+				return cfg.corsOrigin == "*" || r.Header.Get("Origin") == cfg.corsOrigin
+			},
+		},
+	}
+
+	router := chi.NewRouter()
+	router.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{cfg.corsOrigin},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	router.Get("/healthz", app.health)
+	router.Post("/login", app.login)
+	router.Get("/members", app.members)
+	router.Get("/direct/inbox", app.directInbox)
+	router.Get("/rooms/{roomID}/messages", app.messages)
+	router.Post("/rooms/{roomID}/messages", app.createMessage)
+	router.Post("/calls/token", app.callToken)
+	router.Get("/ws", app.websocket)
+
+	slog.Info("starting private chat API", "port", cfg.port)
+	if err := http.ListenAndServe(":"+cfg.port, router); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func loadConfig() config {
+	return config{
+		port:             env("PORT", "4000"),
+		corsOrigin:       env("CORS_ORIGIN", "*"),
+		sharedInviteCode: env("SHARED_INVITE_CODE", "home"),
+		databaseURL:      env("DATABASE_URL", "postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable"),
+		redisAddr:        env("REDIS_ADDR", "localhost:6379"),
+		livekitAPIKey:    env("LIVEKIT_API_KEY", "devkey"),
+		livekitAPISecret: env("LIVEKIT_API_SECRET", "secret"),
+	}
+}
+
+func env(key, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func retry(ctx context.Context, name string, operation func(context.Context) error) error {
+	var lastErr error
+	for attempt := 1; attempt <= 30; attempt++ {
+		attemptCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		lastErr = operation(attemptCtx)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+
+		slog.Warn("dependency not ready", "dependency", name, "attempt", attempt, "error", lastErr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	return lastErr
+}
+
+func migrate(ctx context.Context, db *pgxpool.Pool) error {
+	_, err := db.Exec(ctx, `
+create table if not exists users (
+  id text primary key,
+  display_name text not null,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
+alter table users add column if not exists last_seen_at timestamptz not null default now();
+
+create table if not exists messages (
+  id text primary key,
+  room_id text not null,
+  sender_id text not null references users(id),
+  sender_name text not null,
+  body text not null,
+  created_at timestamptz not null default now()
+);
+
+with ranked_users as (
+  select id,
+         display_name,
+         first_value(id) over (
+           partition by lower(display_name)
+           order by last_seen_at desc, created_at desc, id desc
+         ) as keep_id,
+         row_number() over (
+           partition by lower(display_name)
+           order by last_seen_at desc, created_at desc, id desc
+         ) as rank
+  from users
+)
+update messages
+set sender_id = ranked_users.keep_id
+from ranked_users
+where messages.sender_id = ranked_users.id
+  and ranked_users.rank > 1;
+
+with ranked_users as (
+  select id,
+         row_number() over (
+           partition by lower(display_name)
+           order by last_seen_at desc, created_at desc, id desc
+         ) as rank
+  from users
+)
+delete from users
+where id in (select id from ranked_users where rank > 1);
+
+create unique index if not exists users_display_name_lower_idx on users(lower(display_name));
+create index if not exists messages_room_created_idx on messages(room_id, created_at);
+create index if not exists users_last_seen_idx on users(last_seen_at desc);
+`)
+	return err
+}
+
+func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+
+	if err := s.db.Ping(ctx); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "postgres unavailable"})
+		return
+	}
+	if err := s.redis.Ping(ctx).Err(); err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "redis unavailable"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func (s *server) login(w http.ResponseWriter, r *http.Request) {
+	var req loginRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.InviteCode = strings.TrimSpace(req.InviteCode)
+	if req.DisplayName == "" || len(req.DisplayName) > 40 || req.InviteCode != s.cfg.sharedInviteCode {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid invite"})
+		return
+	}
+
+	var userID string
+	err := s.db.QueryRow(r.Context(), `
+select id
+from users
+where lower(display_name) = lower($1)
+order by last_seen_at desc, created_at desc
+limit 1`, req.DisplayName).Scan(&userID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		userID = randomID()
+		_, err = s.db.Exec(r.Context(), `insert into users (id, display_name) values ($1, $2)`, userID, req.DisplayName)
+	}
+	if err == nil {
+		_, err = s.db.Exec(r.Context(), `
+update users
+set display_name = $2, last_seen_at = now()
+where id = $1`, userID, req.DisplayName)
+	}
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create user failed"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, loginResponse{UserID: userID, DisplayName: req.DisplayName})
+}
+
+func (s *server) members(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(r.Context(), `
+select id, display_name, created_at, last_seen_at
+from users
+order by last_seen_at desc, created_at desc
+limit 100`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch members failed"})
+		return
+	}
+	defer rows.Close()
+
+	members := make([]member, 0)
+	for rows.Next() {
+		var item member
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.CreatedAt, &item.LastSeenAt); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan members failed"})
+			return
+		}
+		members = append(members, item)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+func (s *server) directInbox(w http.ResponseWriter, r *http.Request) {
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
+	if userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user required"})
+		return
+	}
+
+	rows, err := s.db.Query(r.Context(), `
+select distinct on (room_id) id, room_id, sender_id, sender_name, body, created_at
+from messages
+where room_id like 'dm:%'
+  and (room_id like $1 or room_id like $2)
+order by room_id, created_at desc`, "dm:"+userID+":%", "dm:%:"+userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch inbox failed"})
+		return
+	}
+	defer rows.Close()
+
+	inbox := make([]message, 0)
+	for rows.Next() {
+		var msg message
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan inbox failed"})
+			return
+		}
+		inbox = append(inbox, msg)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"messages": inbox})
+}
+
+func (s *server) messages(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	if roomID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room required"})
+		return
+	}
+	if !canAccessRoom(roomID, strings.TrimSpace(r.URL.Query().Get("userId"))) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	rows, err := s.db.Query(r.Context(), `
+select id, room_id, sender_id, sender_name, body, created_at
+from messages
+where room_id = $1
+order by created_at desc
+limit 200`, roomID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch messages failed"})
+		return
+	}
+	defer rows.Close()
+
+	history := make([]message, 0)
+	for rows.Next() {
+		var msg message
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan messages failed"})
+			return
+		}
+		history = append(history, msg)
+	}
+
+	for i, j := 0, len(history)-1; i < j; i, j = i+1, j-1 {
+		history[i], history[j] = history[j], history[i]
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"messages": history})
+}
+
+func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	var req createMessageRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.SenderID = strings.TrimSpace(req.SenderID)
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	req.Text = strings.TrimSpace(req.Text)
+	if roomID == "" || req.SenderID == "" || req.DisplayName == "" || req.Text == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room, sender, and text required"})
+		return
+	}
+	if !canAccessRoom(roomID, req.SenderID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	msg, ok := s.storeAndPublishMessage(r.Context(), "room:"+roomID, roomID, req.SenderID, req.DisplayName, req.Text)
+	if !ok {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "message rejected"})
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
+}
+
+func (s *server) callToken(w http.ResponseWriter, r *http.Request) {
+	var req callTokenRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.RoomID = strings.TrimSpace(req.RoomID)
+	req.Identity = strings.TrimSpace(req.Identity)
+	req.DisplayName = strings.TrimSpace(req.DisplayName)
+	if req.RoomID == "" || req.Identity == "" || req.DisplayName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room and identity required"})
+		return
+	}
+	if !canAccessRoom(req.RoomID, req.Identity) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	token := auth.NewAccessToken(s.cfg.livekitAPIKey, s.cfg.livekitAPISecret)
+	token.SetIdentity(req.Identity).
+		SetName(req.DisplayName).
+		SetValidFor(time.Hour).
+		SetVideoGrant(&auth.VideoGrant{
+			RoomJoin:     true,
+			Room:         req.RoomID,
+			CanPublish:   boolPtr(true),
+			CanSubscribe: boolPtr(true),
+		})
+
+	jwt, err := token.ToJWT()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "token failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"token": jwt})
+}
+
+func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(r.URL.Query().Get("roomId"))
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
+	displayName := strings.TrimSpace(r.URL.Query().Get("displayName"))
+	if roomID == "" || userID == "" || displayName == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room, user, and displayName required"})
+		return
+	}
+	if !canAccessRoom(roomID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	conn, err := s.upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+
+	channel := "room:" + roomID
+	userChannel := "user:" + userID
+	pubsub := s.redis.Subscribe(ctx, channel, userChannel)
+	defer pubsub.Close()
+
+	go func() {
+		for msg := range pubsub.Channel() {
+			var envelope outboundEnvelope
+			if err := json.Unmarshal([]byte(msg.Payload), &envelope); err == nil {
+				_ = conn.WriteJSON(envelope)
+			}
+		}
+	}()
+
+	joinedMember := member{
+		ID:          userID,
+		DisplayName: displayName,
+		LastSeenAt:  time.Now().UTC(),
+	}
+	s.publish(ctx, channel, outboundEnvelope{Type: "member:joined", Data: joinedMember})
+
+	for {
+		var envelope wsEnvelope
+		if err := conn.ReadJSON(&envelope); err != nil {
+			return
+		}
+
+		switch envelope.Type {
+		case "message:send":
+			var body struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal(envelope.Data, &body); err != nil {
+				continue
+			}
+			s.storeAndPublishMessage(ctx, channel, roomID, userID, displayName, body.Text)
+		case "call:ring":
+			var body struct {
+				Mode string `json:"mode"`
+			}
+			_ = json.Unmarshal(envelope.Data, &body)
+			if body.Mode != "video" {
+				body.Mode = "voice"
+			}
+			envelope := outboundEnvelope{
+				Type: "call:ring",
+				Data: map[string]string{
+					"roomId":   roomID,
+					"senderId": userID,
+					"sender":   displayName,
+					"mode":     body.Mode,
+				},
+			}
+			if recipients := directMessageRecipients(roomID); len(recipients) > 0 {
+				for _, recipient := range recipients {
+					if recipient != userID {
+						s.publish(ctx, "user:"+recipient, envelope)
+					}
+				}
+			} else {
+				for _, recipient := range s.callRingRecipients(ctx, userID) {
+					s.publish(ctx, "user:"+recipient, envelope)
+				}
+			}
+		}
+	}
+}
+
+func (s *server) callRingRecipients(ctx context.Context, senderID string) []string {
+	rows, err := s.db.Query(ctx, `select id from users where id <> $1`, senderID)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+
+	recipients := make([]string, 0)
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err == nil {
+			recipients = append(recipients, userID)
+		}
+	}
+	return recipients
+}
+
+func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, senderID, sender, text string) (message, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" || len(text) > 2000 {
+		return message{}, false
+	}
+
+	msg := message{
+		ID:        randomID(),
+		RoomID:    roomID,
+		SenderID:  senderID,
+		Sender:    sender,
+		Text:      text,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	_, err := s.db.Exec(ctx, `
+insert into messages (id, room_id, sender_id, sender_name, body, created_at)
+values ($1, $2, $3, $4, $5, $6)`,
+		msg.ID, msg.RoomID, msg.SenderID, msg.Sender, msg.Text, msg.CreatedAt)
+	if err != nil {
+		slog.Error("store message", "error", err)
+		return message{}, false
+	}
+
+	envelope := outboundEnvelope{Type: "message:new", Data: msg}
+	s.publish(ctx, channel, envelope)
+	for _, recipient := range directMessageRecipients(roomID) {
+		if recipient != senderID {
+			s.publish(ctx, "user:"+recipient, envelope)
+		}
+	}
+	return msg, true
+}
+
+func directMessageRecipients(roomID string) []string {
+	parts := strings.Split(roomID, ":")
+	if len(parts) == 3 && parts[0] == "dm" && parts[1] != "" && parts[2] != "" {
+		return parts[1:]
+	}
+	return nil
+}
+
+func canAccessRoom(roomID, userID string) bool {
+	recipients := directMessageRecipients(roomID)
+	if len(recipients) == 0 {
+		return true
+	}
+	for _, recipient := range recipients {
+		if recipient == userID {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) publish(ctx context.Context, channel string, envelope outboundEnvelope) {
+	payload, err := json.Marshal(envelope)
+	if err != nil {
+		return
+	}
+	if err := s.redis.Publish(ctx, channel, payload).Err(); err != nil {
+		slog.Error("publish websocket event", "error", err)
+	}
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, target any) bool {
+	defer r.Body.Close()
+	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return false
+	}
+	return true
+}
+
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func randomID() string {
+	var bytes [16]byte
+	if _, err := rand.Read(bytes[:]); err != nil {
+		return hex.EncodeToString([]byte(time.Now().Format(time.RFC3339Nano)))
+	}
+	return hex.EncodeToString(bytes[:])
+}
+
+func boolPtr(value bool) *bool {
+	return &value
+}

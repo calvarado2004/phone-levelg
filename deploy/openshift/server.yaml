@@ -1,0 +1,108 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: phone-levelg
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: phone-levelg-server
+  namespace: phone-levelg
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: phone-levelg-server
+  namespace: phone-levelg
+spec:
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: apps/server/Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: phone-levelg-server:latest
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: phone-levelg-server
+  namespace: phone-levelg
+type: Opaque
+stringData:
+  SHARED_INVITE_CODE: "home"
+  LIVEKIT_API_KEY: "devkey"
+  LIVEKIT_API_SECRET: "secret"
+  DATABASE_URL: "postgres://phone_levelg:phone_levelg@postgres:5432/phone_levelg?sslmode=disable"
+  REDIS_ADDR: "redis:6379"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phone-levelg-server
+  namespace: phone-levelg
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: phone-levelg-server
+  template:
+    metadata:
+      labels:
+        app: phone-levelg-server
+    spec:
+      containers:
+        - name: server
+          image: image-registry.openshift-image-registry.svc:5000/phone-levelg/phone-levelg-server:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 4000
+          env:
+            - name: PORT
+              value: "4000"
+            - name: CORS_ORIGIN
+              value: "*"
+          envFrom:
+            - secretRef:
+                name: phone-levelg-server
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 4000
+            initialDelaySeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phone-levelg-server
+  namespace: phone-levelg
+spec:
+  selector:
+    app: phone-levelg-server
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: phone-levelg-server
+  namespace: phone-levelg
+spec:
+  to:
+    kind: Service
+    name: phone-levelg-server
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

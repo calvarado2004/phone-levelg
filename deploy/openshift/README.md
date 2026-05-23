@@ -1,0 +1,73 @@
+# OpenShift Deployment
+
+Namespace: `phone-levelg`
+
+Storage class for PVC-backed services: `px-csi-db`
+
+## Pieces
+
+- `server.yaml`
+  - namespace
+  - local OpenShift ImageStream
+  - binary BuildConfig
+  - backend secret
+  - backend Deployment
+  - backend Service
+  - backend Route
+
+- `postgres.yaml`
+  - Postgres Secret
+  - Postgres StatefulSet
+  - Postgres PVC using `px-csi-db`
+  - ClusterIP Service
+
+- `redis.yaml`
+  - Redis StatefulSet
+  - Redis PVC using `px-csi-db`
+  - ClusterIP Service
+
+- `livekit.yaml`
+  - LiveKit ConfigMap
+  - LiveKit Deployment
+  - LiveKit LoadBalancer Service
+  - TCP signaling/media ports and UDP WebRTC media ports
+
+## Deploy
+
+```sh
+oc apply -f deploy/openshift/postgres.yaml
+oc apply -f deploy/openshift/redis.yaml
+oc apply -f deploy/openshift/server.yaml
+oc apply -f deploy/openshift/livekit.yaml
+oc start-build phone-levelg-server -n phone-levelg --from-dir=. --follow
+```
+
+## Internal Registry
+
+The backend image is built by OpenShift and pushed into:
+
+```text
+image-registry.openshift-image-registry.svc:5000/phone-levelg/phone-levelg-server:latest
+```
+
+The Deployment pulls that image directly from the local cluster registry.
+
+## LiveKit
+
+LiveKit is deployed in the same namespace and exposed with a MetalLB `LoadBalancer` service.
+
+Current ports:
+
+- `7880/TCP`: LiveKit signaling, used by mobile as `ws://192.168.1.88:7880`
+- `7881/TCP`: WebRTC TCP fallback
+- `50100-50120/UDP`: WebRTC media
+
+The KVM/libvirt OpenShift network allocates the LiveKit service from the `192.168.122.0/24` MetalLB pool. The Fedora host forwards the home/VPN-facing host IP to that LoadBalancer IP with `socat`. The helper script in this directory mirrors the installed service command:
+
+```sh
+HOST_IP=192.168.1.88 \
+LIVEKIT_LB_IP=$(oc -n phone-levelg get svc phone-levelg-livekit -o jsonpath='{.status.loadBalancer.ingress[0].ip}') \
+sudo -E ./deploy/openshift/livekit-host-forward.sh
+```
+
+Do not leave stale DNAT rules for the same host ports active while this forwarder is running. Inbound packets must hit the local `socat` listeners on `7880`, `7881`, and `50100-50120/UDP`.

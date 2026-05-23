@@ -1,0 +1,38 @@
+{
+  "expo": {
+    "name": "Phone LevelG",
+    "slug": "phone-levelg",
+    "scheme": "phonelevelg",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "automatic",
+    "splash": {
+      "image": "./assets/icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#24123D"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "io.levelg.phone",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow Phone LevelG to access your camera for video calls",
+        "NSMicrophoneUsageDescription": "Allow Phone LevelG to access your microphone for voice and video calls"
+      }
+    },
+    "android": {
+      "package": "io.levelg.phone",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/icon.png",
+        "backgroundColor": "#24123D"
+      },
+      "permissions": [
+        "CAMERA",
+        "RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      "expo-audio"
+    ]
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "phone-levelg",
+  "private": true,
+  "license": "MIT",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:server": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go run ./cmd/server",
+    "dev:mobile": "npm run start -w apps/mobile",
+    "typecheck": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./... && cd ../.. && npm run typecheck --workspaces --if-present",
+    "test:server": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./...",
+    "test:container": "docker build -f apps/server/Dockerfile .",
+    "test:openshift": "node tests/openshift/validate-manifests.mjs",
+    "test:deploy-assets": "node tests/deploy/validate-container-assets.mjs",
+    "test:native-assets": "node tests/mobile/validate-native-assets.mjs",
+    "test:screens": "playwright test",
+    "test": "npm run typecheck && npm run test:openshift && npm run test:deploy-assets && npm run test:native-assets && npm run test:screens",
+    "lint": "npm run lint --workspaces --if-present"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.60.0",
+    "yaml": "^2.9.0"
+  }
+}

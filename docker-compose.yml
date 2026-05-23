@@ -1,0 +1,46 @@
+services:
+  server:
+    build:
+      context: .
+      dockerfile: apps/server/Dockerfile
+    environment:
+      PORT: "4000"
+      CORS_ORIGIN: "*"
+      SHARED_INVITE_CODE: home
+      DATABASE_URL: postgres://phone_levelg:phone_levelg@postgres:5432/phone_levelg?sslmode=disable
+      REDIS_ADDR: redis:6379
+      LIVEKIT_API_KEY: devkey
+      LIVEKIT_API_SECRET: secret
+    ports:
+      - "4000:4000"
+    depends_on:
+      - postgres
+      - redis
+
+  livekit:
+    image: docker.io/livekit/livekit-server:latest
+    command: ["--dev", "--bind", "0.0.0.0"]
+    ports:
+      - "7880:7880"
+      - "7881:7881"
+      - "50000-50020:50000-50020/udp"
+
+  postgres:
+    image: docker.io/library/postgres:18-alpine
+    environment:
+      POSTGRES_DB: phone_levelg
+      POSTGRES_USER: phone_levelg
+      POSTGRES_PASSWORD: phone_levelg
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres18-data:/var/lib/postgresql
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  postgres18-data:

@@ -1,0 +1,196 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: phone-levelg-livekit
+  namespace: phone-levelg
+type: Opaque
+stringData:
+  LIVEKIT_KEYS: "devkey: secret"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: phone-levelg-livekit
+  namespace: phone-levelg
+data:
+  livekit.yaml: |
+    port: 7880
+    bind_addresses:
+      - ""
+    keys:
+      devkey: secret
+    rtc:
+      node_ip: 192.168.1.88
+      tcp_port: 7881
+      port_range_start: 50100
+      port_range_end: 50120
+      use_external_ip: false
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: phone-levelg-livekit
+  namespace: phone-levelg
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: phone-levelg-livekit
+  template:
+    metadata:
+      labels:
+        app: phone-levelg-livekit
+    spec:
+      containers:
+        - name: livekit
+          image: docker.io/livekit/livekit-server:latest
+          args: ["--config", "/etc/livekit/livekit.yaml"]
+          ports:
+            - name: signal
+              containerPort: 7880
+            - name: rtc-tcp
+              containerPort: 7881
+            - name: rtc-udp
+              containerPort: 50100
+              protocol: UDP
+          env:
+            - name: LIVEKIT_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: phone-levelg-livekit
+                  key: LIVEKIT_KEYS
+          volumeMounts:
+            - name: livekit-config
+              mountPath: /etc/livekit
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 7880
+            initialDelaySeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 7880
+            initialDelaySeconds: 15
+      volumes:
+        - name: livekit-config
+          configMap:
+            name: phone-levelg-livekit
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: phone-levelg-livekit
+  namespace: phone-levelg
+spec:
+  type: LoadBalancer
+  externalTrafficPolicy: Local
+  selector:
+    app: phone-levelg-livekit
+  ports:
+    - name: signal
+      port: 7880
+      targetPort: 7880
+    - name: rtc-tcp
+      port: 7881
+      targetPort: 7881
+    - name: rtc-udp-50100
+      port: 50100
+      targetPort: 50100
+      protocol: UDP
+    - name: rtc-udp-50101
+      port: 50101
+      targetPort: 50101
+      protocol: UDP
+    - name: rtc-udp-50102
+      port: 50102
+      targetPort: 50102
+      protocol: UDP
+    - name: rtc-udp-50103
+      port: 50103
+      targetPort: 50103
+      protocol: UDP
+    - name: rtc-udp-50104
+      port: 50104
+      targetPort: 50104
+      protocol: UDP
+    - name: rtc-udp-50105
+      port: 50105
+      targetPort: 50105
+      protocol: UDP
+    - name: rtc-udp-50106
+      port: 50106
+      targetPort: 50106
+      protocol: UDP
+    - name: rtc-udp-50107
+      port: 50107
+      targetPort: 50107
+      protocol: UDP
+    - name: rtc-udp-50108
+      port: 50108
+      targetPort: 50108
+      protocol: UDP
+    - name: rtc-udp-50109
+      port: 50109
+      targetPort: 50109
+      protocol: UDP
+    - name: rtc-udp-50110
+      port: 50110
+      targetPort: 50110
+      protocol: UDP
+    - name: rtc-udp-50111
+      port: 50111
+      targetPort: 50111
+      protocol: UDP
+    - name: rtc-udp-50112
+      port: 50112
+      targetPort: 50112
+      protocol: UDP
+    - name: rtc-udp-50113
+      port: 50113
+      targetPort: 50113
+      protocol: UDP
+    - name: rtc-udp-50114
+      port: 50114
+      targetPort: 50114
+      protocol: UDP
+    - name: rtc-udp-50115
+      port: 50115
+      targetPort: 50115
+      protocol: UDP
+    - name: rtc-udp-50116
+      port: 50116
+      targetPort: 50116
+      protocol: UDP
+    - name: rtc-udp-50117
+      port: 50117
+      targetPort: 50117
+      protocol: UDP
+    - name: rtc-udp-50118
+      port: 50118
+      targetPort: 50118
+      protocol: UDP
+    - name: rtc-udp-50119
+      port: 50119
+      targetPort: 50119
+      protocol: UDP
+    - name: rtc-udp-50120
+      port: 50120
+      targetPort: 50120
+      protocol: UDP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: phone-levelg-livekit
+  namespace: phone-levelg
+spec:
+  to:
+    kind: Service
+    name: phone-levelg-livekit
+  port:
+    targetPort: signal
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect
