@@ -40,9 +40,14 @@ assert.match(appTsx, /onPress=\{\(\) => void joinCall\("video"\)\}/, "Video call
 assert.match(appTsx, /hitSlop=\{12\}/, "Call buttons must have enlarged mobile tap targets");
 assert.match(appTsx, /setIncomingCall\(\{ roomId: payload\.data\.roomId, sender: payload\.data\.sender, mode: ringMode \}\)/, "Incoming calls must render a call UI with the ringing room");
 assert.match(appTsx, /joinCall\(nextCall\.mode, nextCall\.roomId, false\)/, "Accepting an incoming call must join the room that actually rang");
+assert.match(appTsx, /type: "call:end"/, "Call termination must be signaled to the other device");
+assert.match(appTsx, /sendSocket\("call:end", \{ roomId: roomID \}\)/, "Hangup must notify the other device which room ended");
+assert.match(appTsx, /setCameraEnabled\(false\)/, "Hangup must explicitly stop the local camera");
+assert.match(appTsx, /setMicrophoneEnabled\(false\)/, "Hangup must explicitly stop the local microphone");
 assert.match(appTsx, /createAudioPlayer\(require\("\.\/assets\/incoming-call\.wav"\)/, "Incoming calls must play the bundled ringtone");
 assert.match(appTsx, /player\.loop = true/, "Incoming call ringtone must loop until accepted or declined");
 assert.match(appTsx, /Vibration\.vibrate\(\[0, 750, 350\], true\)/, "Incoming calls must vibrate until accepted or declined");
+assert.match(appTsx, /bottom: 0,[\s\S]*justifyContent: "space-between"/, "Incoming calls must use a full-screen phone-style call sheet");
 assert.match(appJson, /"icon": "\.\/assets\/icon\.png"/, "Expo must have a real app icon source");
 assert.match(appJson, /"adaptiveIcon"/, "Android must have adaptive icon config");
 assert.match(mobilePackage, /EXPO_PUBLIC_LIVEKIT_URL=ws:\/\/192\.168\.1\.88:7880/, "OpenShift mobile builds must use the Fedora host LiveKit forwarder");

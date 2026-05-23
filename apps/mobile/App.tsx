@@ -73,6 +73,7 @@ type IncomingCall = {
 type SocketEvent =
   | { type: "message:new"; data: Message }
   | { type: "call:ring"; data: { roomId: string; senderId: string; sender: string; mode?: "voice" | "video" } }
+  | { type: "call:end"; data: { roomId: string; senderId: string; sender: string } }
   | { type: "member:joined"; data: Member };
 
 const QUICK_EMOJIS = ["👍", "😂", "❤️", "🔥", "🎉", "👀"];
@@ -119,6 +120,8 @@ export default function App() {
   const [callMode, setCallMode] = useState<"voice" | "video">("voice");
   const socketRef = useRef<WebSocket | null>(null);
   const roomRef = useRef<Room | null>(null);
+  const activeCallRoomIDRef = useRef<string | null>(null);
+  const incomingCallRef = useRef<IncomingCall | null>(null);
   const ringtoneRef = useRef<AudioPlayer | null>(null);
 
   const activeRoomID = useMemo(() => {
@@ -127,6 +130,10 @@ export default function App() {
   }, [selectedMember, session]);
   const activeRoomTitle = selectedMember?.displayName ?? "Home";
   const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
+
+  useEffect(() => {
+    incomingCallRef.current = incomingCall;
+  }, [incomingCall]);
 
   async function refreshMessages(roomID = activeRoomID, userID = session?.userId) {
     if (!userID) return;
@@ -208,6 +215,14 @@ export default function App() {
         setIncomingCall({ roomId: payload.data.roomId, sender: payload.data.sender, mode: ringMode });
         void startIncomingCallTone();
       }
+      if (payload.type === "call:end" && payload.data.senderId !== session.userId) {
+        if (incomingCallRef.current?.roomId === payload.data.roomId) {
+          void declineIncomingCall();
+        }
+        if (activeCallRoomIDRef.current === payload.data.roomId) {
+          void endCurrentCall({ announce: false, status: "Call ended" });
+        }
+      }
       if (payload.type === "member:joined") {
         setMembers(current => upsertMember(current, payload.data));
       }
@@ -287,6 +302,10 @@ export default function App() {
   async function joinCall(mode: "voice" | "video", roomID = activeRoomID, announce = true) {
     if (!session) return;
     await stopIncomingCallTone();
+    if (roomRef.current) {
+      await endCurrentCall({ announce: false, status: "Switching call" });
+    }
+    activeCallRoomIDRef.current = roomID;
     setCallMode(mode);
     setCallActive(true);
     setCallStatus("Connecting");
@@ -345,6 +364,7 @@ export default function App() {
         setCallStatus("Connected");
       });
       room.on(RoomEvent.Disconnected, () => {
+        activeCallRoomIDRef.current = null;
         setCallActive(false);
         setCallStatus("Ready");
         setRemoteParticipantCount(0);
@@ -361,20 +381,32 @@ export default function App() {
         }
       }
     } catch (error) {
-      await roomRef.current?.disconnect().catch(() => undefined);
-      roomRef.current = null;
-      setCallActive(false);
-      setCallStatus("Ready");
-      setRemoteParticipantCount(0);
+      await endCurrentCall({ announce: false, status: "Ready" });
       Alert.alert("Call failed", error instanceof Error ? error.message : "Unable to start the call.");
     }
   }
 
   async function leaveCall() {
-    await roomRef.current?.disconnect();
+    await endCurrentCall({ announce: true, status: "Call ended" });
+  }
+
+  async function endCurrentCall({ announce, status }: { announce: boolean; status: string }) {
+    await stopIncomingCallTone();
+    const roomID = activeCallRoomIDRef.current;
+    if (announce && roomID) {
+      sendSocket("call:end", { roomId: roomID });
+    }
+    const room = roomRef.current;
     roomRef.current = null;
+    activeCallRoomIDRef.current = null;
+    if (room) {
+      await room.localParticipant.setCameraEnabled(false).catch(() => undefined);
+      await room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
+      await room.disconnect().catch(() => undefined);
+      room.removeAllListeners();
+    }
     setCallActive(false);
-    setCallStatus("Ready");
+    setCallStatus(status);
     setRemoteParticipantCount(0);
   }
 
@@ -508,11 +540,14 @@ export default function App() {
 
         {incomingCall && (
           <View style={styles.incomingCallOverlay}>
-            <View style={styles.incomingPulse}>
-              {incomingCall.mode === "video" ? <Video color="#ffffff" size={34} /> : <Phone color="#ffffff" size={34} />}
+            <View style={styles.incomingCallContent}>
+              <View style={styles.incomingPulse}>
+                {incomingCall.mode === "video" ? <Video color="#ffffff" size={42} /> : <Phone color="#ffffff" size={42} />}
+              </View>
+              <Text style={styles.incomingLabel}>Incoming {incomingCall.mode === "video" ? "video" : "voice"} call</Text>
+              <Text style={styles.incomingName}>{incomingCall.sender}</Text>
+              <Text style={styles.incomingHint}>Phone LevelG</Text>
             </View>
-            <Text style={styles.incomingLabel}>Incoming {incomingCall.mode === "video" ? "video" : "voice"} call</Text>
-            <Text style={styles.incomingName}>{incomingCall.sender}</Text>
             <View style={styles.incomingActions}>
               <Pressable style={[styles.callActionButton, styles.declineButton]} onPress={declineIncomingCall}>
                 <PhoneOff color="#ffffff" size={24} />
@@ -868,53 +903,67 @@ const styles = StyleSheet.create({
   },
   incomingCallOverlay: {
     position: "absolute",
-    left: 18,
-    right: 18,
-    top: 96,
+    left: 0,
+    right: 0,
+    top: 0,
+    bottom: 0,
     zIndex: 10,
-    borderRadius: 24,
-    paddingHorizontal: 20,
-    paddingVertical: 22,
+    paddingHorizontal: 28,
+    paddingTop: 78 + ANDROID_STATUS_BAR_HEIGHT,
+    paddingBottom: 46,
     alignItems: "center",
+    justifyContent: "space-between",
     backgroundColor: "#24123d",
-    borderWidth: 1,
-    borderColor: "#8b5cf6",
     shadowColor: "#000000",
     shadowOpacity: 0.22,
     shadowRadius: 22,
     shadowOffset: { width: 0, height: 12 },
     elevation: 12
   },
+  incomingCallContent: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    width: "100%"
+  },
   incomingPulse: {
-    width: 74,
-    height: 74,
-    borderRadius: 37,
+    width: 104,
+    height: 104,
+    borderRadius: 52,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#7c3aed",
-    marginBottom: 14
+    marginBottom: 28
   },
   incomingLabel: {
     color: "#d8ccff",
-    fontSize: 13,
+    fontSize: 14,
     fontWeight: "800",
     textTransform: "uppercase"
   },
   incomingName: {
     color: "#ffffff",
-    fontSize: 26,
+    fontSize: 36,
     fontWeight: "900",
-    marginTop: 6
+    marginTop: 10,
+    textAlign: "center"
+  },
+  incomingHint: {
+    color: "#c4b5fd",
+    fontSize: 16,
+    fontWeight: "700",
+    marginTop: 10
   },
   incomingActions: {
     flexDirection: "row",
-    gap: 34,
-    marginTop: 22
+    justifyContent: "space-between",
+    width: "74%",
+    maxWidth: 310
   },
   callActionButton: {
-    width: 62,
-    height: 62,
-    borderRadius: 31,
+    width: 72,
+    height: 72,
+    borderRadius: 36,
     alignItems: "center",
     justifyContent: "center"
   },

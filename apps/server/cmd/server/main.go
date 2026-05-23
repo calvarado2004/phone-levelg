@@ -520,33 +520,67 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 			s.storeAndPublishMessage(ctx, channel, roomID, userID, displayName, body.Text)
 		case "call:ring":
 			var body struct {
-				Mode string `json:"mode"`
+				RoomID string `json:"roomId"`
+				Mode   string `json:"mode"`
 			}
 			_ = json.Unmarshal(envelope.Data, &body)
+			targetRoomID := strings.TrimSpace(body.RoomID)
+			if targetRoomID == "" {
+				targetRoomID = roomID
+			}
+			if !canAccessRoom(targetRoomID, userID) {
+				continue
+			}
 			if body.Mode != "video" {
 				body.Mode = "voice"
 			}
 			envelope := outboundEnvelope{
 				Type: "call:ring",
 				Data: map[string]string{
-					"roomId":   roomID,
+					"roomId":   targetRoomID,
 					"senderId": userID,
 					"sender":   displayName,
 					"mode":     body.Mode,
 				},
 			}
-			if recipients := directMessageRecipients(roomID); len(recipients) > 0 {
-				for _, recipient := range recipients {
-					if recipient != userID {
-						s.publish(ctx, "user:"+recipient, envelope)
-					}
-				}
-			} else {
-				for _, recipient := range s.callRingRecipients(ctx, userID) {
-					s.publish(ctx, "user:"+recipient, envelope)
-				}
+			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
+		case "call:end":
+			var body struct {
+				RoomID string `json:"roomId"`
+			}
+			_ = json.Unmarshal(envelope.Data, &body)
+			targetRoomID := strings.TrimSpace(body.RoomID)
+			if targetRoomID == "" {
+				targetRoomID = roomID
+			}
+			if !canAccessRoom(targetRoomID, userID) {
+				continue
+			}
+			envelope := outboundEnvelope{
+				Type: "call:end",
+				Data: map[string]string{
+					"roomId":   targetRoomID,
+					"senderId": userID,
+					"sender":   displayName,
+				},
+			}
+			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
+		}
+	}
+}
+
+func (s *server) publishCallEvent(ctx context.Context, roomID, senderID string, envelope outboundEnvelope) {
+	if recipients := directMessageRecipients(roomID); len(recipients) > 0 {
+		for _, recipient := range recipients {
+			if recipient != senderID {
+				s.publish(ctx, "user:"+recipient, envelope)
 			}
 		}
+		return
+	}
+
+	for _, recipient := range s.callRingRecipients(ctx, senderID) {
+		s.publish(ctx, "user:"+recipient, envelope)
 	}
 }
 

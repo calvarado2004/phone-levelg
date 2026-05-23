@@ -533,6 +533,35 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 	if ringPayload.RoomID != "home" || ringPayload.SenderID != "alice" || ringPayload.Mode != "voice" {
 		t.Fatalf("unexpected ring payload: %#v", ringPayload)
 	}
+
+	if err := alice.WriteJSON(wsEnvelope{
+		Type: "call:end",
+		Data: json.RawMessage(`{"roomId":"home"}`),
+	}); err != nil {
+		t.Fatalf("send lobby call end: %v", err)
+	}
+
+	var ended outboundEnvelope
+	if err := bob.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set bob end deadline: %v", err)
+	}
+	if err := bob.ReadJSON(&ended); err != nil {
+		t.Fatalf("bob did not receive lobby call end on user channel: %v", err)
+	}
+	if ended.Type != "call:end" {
+		t.Fatalf("expected call:end, got %q", ended.Type)
+	}
+	var endPayload struct {
+		RoomID   string `json:"roomId"`
+		SenderID string `json:"senderId"`
+	}
+	encodedEndPayload, _ := json.Marshal(ended.Data)
+	if err := json.Unmarshal(encodedEndPayload, &endPayload); err != nil {
+		t.Fatalf("decode end payload: %v", err)
+	}
+	if endPayload.RoomID != "home" || endPayload.SenderID != "alice" {
+		t.Fatalf("unexpected end payload: %#v", endPayload)
+	}
 }
 
 func resetIntegrationState(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
