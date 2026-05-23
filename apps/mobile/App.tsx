@@ -9,10 +9,10 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  LogBox,
   Platform,
   PermissionsAndroid,
   Pressable,
-  SafeAreaView,
   StyleSheet,
   StatusBar as NativeStatusBar,
   Text,
@@ -20,7 +20,7 @@ import {
   Vibration,
   View
 } from "react-native";
-import { Room, RoomEvent, isVideoTrack, type VideoTrack as LiveKitVideoTrack } from "livekit-client";
+import { LogLevel, Room, RoomEvent, isVideoTrack, setLogLevel, type VideoTrack as LiveKitVideoTrack } from "livekit-client";
 import {
   Phone,
   PhoneOff,
@@ -32,6 +32,8 @@ import {
 } from "lucide-react-native";
 
 registerGlobals();
+setLogLevel(LogLevel.silent);
+LogBox.ignoreLogs(["could not determine track dimensions"]);
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -44,6 +46,8 @@ const LIVEKIT_URL = process.env.EXPO_PUBLIC_LIVEKIT_URL ?? DEFAULT_LIVEKIT_URL;
 const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
 const ANDROID_STATUS_BAR_HEIGHT = Platform.OS === "android" ? NativeStatusBar.currentHeight ?? 0 : 0;
+const IOS_STATUS_BAR_HEIGHT = Platform.OS === "ios" ? 44 : 0;
+const TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT + IOS_STATUS_BAR_HEIGHT;
 
 type Session = {
   userId: string;
@@ -200,14 +204,14 @@ export default function App() {
     void refreshMembers();
     void refreshDirectInbox();
 
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
     const wsURL = `${API_URL.replace(/^http/, "ws")}/ws?roomId=${encodeURIComponent(activeRoomID)}&userId=${encodeURIComponent(session.userId)}&displayName=${encodeURIComponent(session.displayName)}`;
-    const socket = new WebSocket(wsURL);
-    socketRef.current = socket;
-
-    socket.onopen = () => setConnected(true);
-    socket.onclose = () => setConnected(false);
-    socket.onerror = () => setConnected(false);
-    socket.onmessage = event => {
+    const scheduleReconnect = () => {
+      if (disposed) return;
+      reconnectTimer = setTimeout(connectSocket, 1500);
+    };
+    const handleSocketMessage = (event: WebSocketMessageEvent) => {
       const payload = JSON.parse(event.data) as SocketEvent;
       if (payload.type === "message:new") {
         if (payload.data.roomId === activeRoomID) {
@@ -242,9 +246,33 @@ export default function App() {
         setMembers(current => upsertMember(current, payload.data));
       }
     };
+    const connectSocket = () => {
+      const socket = new WebSocket(wsURL);
+      socketRef.current = socket;
+
+      socket.onopen = () => setConnected(true);
+      socket.onclose = () => {
+        if (socketRef.current === socket) {
+          socketRef.current = null;
+        }
+        setConnected(false);
+        scheduleReconnect();
+      };
+      socket.onerror = () => {
+        setConnected(false);
+        socket.close();
+      };
+      socket.onmessage = handleSocketMessage;
+    };
+
+    connectSocket();
 
     return () => {
-      socket.close();
+      disposed = true;
+      if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+      }
+      socketRef.current?.close();
       socketRef.current = null;
       void stopIncomingCallTone();
     };
@@ -596,7 +624,7 @@ export default function App() {
 
   if (!session) {
     return (
-      <SafeAreaView style={styles.shell}>
+      <View style={styles.shell}>
         <ExpoStatusBar style="light" />
         <View style={styles.loginHero}>
           <View style={styles.logoMark}>
@@ -629,12 +657,12 @@ export default function App() {
             <Text style={styles.primaryButtonText}>Join</Text>
           </Pressable>
         </View>
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.shell}>
+    <View style={styles.shell}>
       <ExpoStatusBar style="light" />
       <KeyboardAvoidingView
         behavior={Platform.OS === "ios" ? "padding" : undefined}
@@ -834,7 +862,7 @@ export default function App() {
           </Pressable>
         </View>
       </KeyboardAvoidingView>
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -860,7 +888,7 @@ function CameraStreamView({ track, mirror, zOrder }: { track: LiveKitVideoTrack;
       style={styles.videoView}
       objectFit="cover"
       mirror={mirror}
-      zOrder={zOrder}
+      zOrder={Platform.OS === "android" ? zOrder : undefined}
     />
   );
 }
@@ -966,7 +994,7 @@ const styles = StyleSheet.create({
   },
   loginHero: {
     paddingHorizontal: 24,
-    paddingTop: 64 + ANDROID_STATUS_BAR_HEIGHT,
+    paddingTop: 64 + TOP_SAFE_AREA_HEIGHT,
     paddingBottom: 28,
     backgroundColor: "#0f1720"
   },
@@ -1031,9 +1059,9 @@ const styles = StyleSheet.create({
     backgroundColor: "#eee9ff"
   },
   header: {
-    minHeight: 76 + ANDROID_STATUS_BAR_HEIGHT,
+    minHeight: 76 + TOP_SAFE_AREA_HEIGHT,
     paddingHorizontal: 16,
-    paddingTop: 10 + ANDROID_STATUS_BAR_HEIGHT,
+    paddingTop: 10 + TOP_SAFE_AREA_HEIGHT,
     paddingBottom: 10,
     backgroundColor: "#0f1720",
     flexDirection: "row",
@@ -1103,7 +1131,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     zIndex: 10,
     paddingHorizontal: 28,
-    paddingTop: 78 + ANDROID_STATUS_BAR_HEIGHT,
+    paddingTop: 78 + TOP_SAFE_AREA_HEIGHT,
     paddingBottom: 46,
     alignItems: "center",
     justifyContent: "space-between",

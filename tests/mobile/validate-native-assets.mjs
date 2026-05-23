@@ -6,6 +6,8 @@ const settingsGradle = readFileSync("apps/mobile/android/settings.gradle", "utf8
 const appBuildGradle = readFileSync("apps/mobile/android/app/build.gradle", "utf8");
 const podfile = readFileSync("apps/mobile/ios/Podfile", "utf8");
 const infoPlist = readFileSync("apps/mobile/ios/PhoneLevelG/Info.plist", "utf8");
+const rootPackage = readFileSync("package.json", "utf8");
+const openshiftServer = readFileSync("deploy/openshift/server.yaml", "utf8");
 const appJson = readFileSync("apps/mobile/app.json", "utf8");
 const mobilePackage = readFileSync("apps/mobile/package.json", "utf8");
 const appTsx = readFileSync("apps/mobile/App.tsx", "utf8");
@@ -21,8 +23,14 @@ assert.match(infoPlist, /NSCameraUsageDescription/, "iOS must declare camera usa
 assert.match(infoPlist, /NSMicrophoneUsageDescription/, "iOS must declare microphone usage for calls");
 assert.match(infoPlist, /<key>UIBackgroundModes<\/key>[\s\S]*<string>fetch<\/string>[\s\S]*<string>remote-notification<\/string>/, "Native iOS Info.plist must include the background modes used by the app delegate");
 assert.match(appTsx, /registerGlobals\(\)/, "LiveKit WebRTC globals must be registered before calls");
+assert.match(appTsx, /setLogLevel\(LogLevel\.silent\)/, "LiveKit native dimension warnings must not open LogBox during video calls");
+assert.match(appTsx, /LogBox\.ignoreLogs\(\["could not determine track dimensions"\]\)/, "Known LiveKit iOS dimension warning must be ignored");
+assert.match(appTsx, /scheduleReconnect/, "Mobile websocket must reconnect after transient route or pod interruptions");
+assert.match(appTsx, /setTimeout\(connectSocket, 1500\)/, "Mobile websocket reconnects must be bounded and automatic");
 assert.match(appTsx, /StatusBar as NativeStatusBar/, "Android layout must read native status bar height");
-assert.match(appTsx, /paddingTop: 10 \+ ANDROID_STATUS_BAR_HEIGHT/, "Android header must reserve status bar space so call buttons are tappable");
+assert.match(appTsx, /TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT \+ IOS_STATUS_BAR_HEIGHT/, "Mobile layout must reserve platform safe-area height without deprecated SafeAreaView");
+assert.match(appTsx, /paddingTop: 10 \+ TOP_SAFE_AREA_HEIGHT/, "Header must reserve status bar space so call buttons are tappable");
+assert.doesNotMatch(appTsx, /SafeAreaView/, "App must avoid deprecated React Native SafeAreaView warnings");
 assert.match(appTsx, /from "expo-audio"/, "Incoming calls must use the compatible Expo audio module for ringtone playback");
 assert.match(appTsx, /directRoomID/, "Mobile app must support deterministic 1-1 direct message rooms");
 assert.match(appTsx, /`dm:\$\{\[firstID, secondID\]\.sort\(\)\.join\(":\"\)\}`/, "1-1 rooms must use explicit private room IDs");
@@ -36,6 +44,7 @@ assert.doesNotMatch(appTsx, /sendSocket\("message:send"/, "Composer must not dep
 assert.match(appTsx, /requestCallPermissions\(mode\)/, "Call permissions must match voice or video mode");
 assert.match(appTsx, /setCallActive\(true\);\s*setCallStatus\("Connecting"\);/s, "Call taps must immediately show connecting state");
 assert.match(appTsx, /RTCView/, "Video calls must render WebRTC video streams directly");
+assert.match(appTsx, /zOrder=\{Platform\.OS === "android" \? zOrder : undefined\}/, "iOS WebRTC views must not receive Android z-order layering");
 assert.match(appTsx, /remoteVideoTrack/, "Video calls must keep remote camera track state");
 assert.match(appTsx, /localVideoTrack/, "Video calls must keep local camera preview state");
 assert.match(appTsx, /switchActiveDevice\("videoinput"/, "Video calls must allow switching to another camera");
@@ -62,8 +71,10 @@ assert.match(appTsx, /bottom: 0,[\s\S]*justifyContent: "space-between"/, "Incomi
 assert.match(appJson, /"icon": "\.\/assets\/icon\.png"/, "Expo must have a real app icon source");
 assert.match(appJson, /"adaptiveIcon"/, "Android must have adaptive icon config");
 assert.match(appJson, /"UIBackgroundModes"[\s\S]*"fetch"[\s\S]*"remote-notification"/, "iOS background mode warnings must be covered by Info.plist");
+assert.match(rootPackage, /dev:mobile:openshift[\s\S]*EXPO_PUBLIC_API_URL=https:\/\/phone-levelg-server-phone-levelg\.apps\.ocp-think\.levelg\.io[\s\S]*EXPO_PUBLIC_LIVEKIT_URL=ws:\/\/192\.168\.1\.88:7880/, "Metro must have an OpenShift script so dev clients do not fall back to localhost");
 assert.match(mobilePackage, /EXPO_PUBLIC_LIVEKIT_URL=ws:\/\/192\.168\.1\.88:7880/, "OpenShift mobile builds must use the Fedora host LiveKit forwarder");
 assert.doesNotMatch(mobilePackage, /openshift[^"]*EXPO_PUBLIC_LIVEKIT_URL=ws:\/\/localhost:7880/, "OpenShift mobile builds must not point LiveKit at localhost");
+assert.match(openshiftServer, /replicas: 1/, "OpenShift backend must stay single-replica until websocket presence is fully externalized");
 assert.match(androidIcon, /@mipmap\/ic_launcher_foreground/, "Android adaptive icon must use the pasted phone artwork");
 assert.match(adaptiveIcon, /#7C3AED/, "Fallback Android adaptive vector must use purple phone artwork");
 assert.ok(existsSync("apps/mobile/assets/icon.png"), "mobile app icon PNG must exist");

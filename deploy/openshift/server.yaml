@@ -45,7 +45,7 @@ metadata:
   name: phone-levelg-server
   namespace: phone-levelg
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: phone-levelg-server

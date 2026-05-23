@@ -36,7 +36,11 @@ assert.equal(
   deployment.spec.template.spec.containers[0].image,
   "image-registry.openshift-image-registry.svc:5000/phone-levelg/phone-levelg-server:latest"
 );
-assert.equal(deployment.spec.replicas, 2);
+assert.equal(
+  deployment.spec.replicas,
+  1,
+  "server websocket presence is process-local, so the backend must stay single-replica until presence is externalized"
+);
 
 for (const statefulSetName of ["postgres", "redis"]) {
   const statefulSet = find("StatefulSet", statefulSetName);
