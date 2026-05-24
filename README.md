@@ -29,49 +29,121 @@ MongoDB is not deployed. The MVP does not need a document database, and keeping 
 │       ├── Dockerfile      # Go 1.26 container build
 │       └── README.md
 ├── deploy
+│   ├── local               # Local LiveKit config used by Docker Compose
 │   └── openshift           # OpenShift manifests
 ├── docs
-│   └── ARCHITECTURE.md     # Architecture notes
+│   ├── ARCHITECTURE.md     # Architecture notes
+│   └── screenshots         # Mobile app screenshots
 ├── tests
 │   ├── deploy              # Container/deploy asset checks
 │   ├── mobile              # Native project asset checks
 │   └── openshift           # Manifest validation
-└── docker-compose.yml      # Local Postgres/Redis
+└── docker-compose.yml      # Local Postgres/Redis/LiveKit
 ```
 
-## Architecture
+## Screenshots
 
-```text
-iOS / Android app
-  |
-  | HTTPS
-  |   - Google-email + invite-code login
-  |   - message history
-  |   - LiveKit token requests
-  |
-  | WebSocket
-  |   - live chat events
-  |   - call ring events
-  v
-Go backend on OpenShift
-  |
-  ├── Postgres 18
-  |     - users
-  |     - rooms
-  |     - messages
-  |
-  ├── Redis
-  |     - room pub/sub
-  |     - live event fan-out across backend replicas
-  |
-  └── LiveKit token minting
+| Home and lobby | Private chat | Incoming call |
+| --- | --- | --- |
+| ![Phone LevelG home and lobby](docs/screenshots/phoneApp01.png) | ![Phone LevelG private chat](docs/screenshots/phoneApp02.png) | ![Phone LevelG incoming call](docs/screenshots/phoneApp03.png) |
 
-LiveKit server
-  |
-  └── WebRTC media for voice/video calls
+| Voice call | Video call |
+| --- | --- |
+| ![Phone LevelG voice call](docs/screenshots/phoneApp04.png) | ![Phone LevelG video call](docs/screenshots/phoneApp05.png) |
+
+## Technology Architecture
+
+```mermaid
+flowchart LR
+  subgraph Clients["Native clients"]
+    Android["Android app\nReact Native + Expo\nRelease APK"]
+    IOS["iOS app\nReact Native + Expo\nRelease app"]
+  end
+
+  subgraph Backend["Private backend"]
+    API["Go 1.26 API\nchi router"]
+    PG["Postgres 18\nusers + messages"]
+    Redis["Redis 7\npub/sub fan-out"]
+    LK["LiveKit\nWebRTC SFU"]
+  end
+
+  Android -->|"HTTPS\nlogin, members, messages, call tokens"| API
+  IOS -->|"HTTPS\nlogin, members, messages, call tokens"| API
+  Android -->|"WebSocket\nchat, presence, call ring/end/reject"| API
+  IOS -->|"WebSocket\nchat, presence, call ring/end/reject"| API
+  API -->|"SQL"| PG
+  API -->|"publish / subscribe"| Redis
+  API -->|"JWT minting\n/calls/token"| LK
+  Android -->|"WebRTC media\nvoice/video"| LK
+  IOS -->|"WebRTC media\nvoice/video"| LK
 ```
 
-The backend does not carry audio or video media. It only issues LiveKit JWTs. Mobile clients use those tokens to connect directly to LiveKit for WebRTC media.
+The backend does not carry audio or video media. It validates identity, stores messages, publishes signaling events, and issues LiveKit JWTs. Mobile clients use those tokens to connect directly to LiveKit for WebRTC media.
+
+```mermaid
+sequenceDiagram
+  participant Caller as Android/iOS caller
+  participant API as Go API
+  participant Callee as Android/iOS callee
+  participant LiveKit as LiveKit
+
+  Caller->>API: POST /calls/token
+  API-->>Caller: LiveKit room JWT
+  Caller->>LiveKit: Join room and publish microphone/camera
+  Caller->>API: WebSocket call:ring(roomId, mode)
+  API-->>Callee: WebSocket call:ring
+  Callee-->>Callee: Full-screen incoming-call UI + rockstar ringtone
+  Callee->>API: POST /calls/token
+  API-->>Callee: LiveKit room JWT
+  Callee->>LiveKit: Join same room and publish media
+  LiveKit-->>Caller: Remote audio/video tracks
+  LiveKit-->>Callee: Remote audio/video tracks
+```
+
+```mermaid
+flowchart TB
+  subgraph Local["Local development"]
+    Compose["docker compose"]
+    LocalAPI["Go API :4000"]
+    LocalPG["Postgres :5432"]
+    LocalRedis["Redis :6379"]
+    LocalLiveKit["LiveKit :7880/:7881\nUDP 50100-50120"]
+  end
+
+  subgraph OCP["OpenShift deployment"]
+    Route["Private OpenShift route"]
+    Build["Binary BuildConfig\ninternal registry image"]
+    Deploy["Go API Deployment"]
+    OcpPG["Postgres StatefulSet\npx-csi-db PVC"]
+    OcpRedis["Redis StatefulSet\npx-csi-db PVC"]
+    OcpLiveKit["LiveKit Deployment\nLoadBalancer + host forward"]
+  end
+
+  Compose --> LocalAPI
+  Compose --> LocalPG
+  Compose --> LocalRedis
+  Compose --> LocalLiveKit
+  Route --> Deploy
+  Build --> Deploy
+  Deploy --> OcpPG
+  Deploy --> OcpRedis
+  Deploy --> OcpLiveKit
+```
+
+### Implementation Details
+
+| Area | Technology | Implementation |
+| --- | --- | --- |
+| Mobile UI | React Native, Expo, TypeScript | The main app surface is in `apps/mobile/App.tsx`. It handles login, lobby presence, direct chats, message rendering, call controls, incoming-call overlays, and full-screen voice/video call layouts. |
+| Native shells | Android Gradle project, iOS Xcode project | Native projects live under `apps/mobile/android` and `apps/mobile/ios`. Release builds are used for emulator, simulator, and device validation. |
+| Calling UI | LiveKit React Native, WebRTC, Expo notifications | Calls use a phone-style full-screen surface. Video calls show the remote video, the contact icon/name header, `Calling <contact-name>`, and a bottom-right local camera preview. Incoming calls use the bundled `rockstar.mp3` ringtone. |
+| Identity | Google email plus invite code | The backend keys accounts by normalized `accountEmail`. Display names are presentation-only and can overlap across users. |
+| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores messages, enforces direct-room access, maintains websocket sessions, and mints LiveKit tokens. |
+| Durable state | Postgres 18 | Users and messages are stored in Postgres. OpenShift uses a `px-csi-db` PVC with `PGDATA` below the mounted PVC root. |
+| Live events | Redis 7 | Redis pub/sub fans out chat, presence, direct-room deletion, and call signaling events across backend instances. |
+| Media | LiveKit | LiveKit carries the actual voice/video media. Local Docker and OpenShift configs advertise a reachable node IP and mapped WebRTC ports so clients do not try to connect to container or pod IPs. |
+| Deployment | Docker Compose, OpenShift, internal registry | Docker Compose runs local state and LiveKit. OpenShift manifests create the namespace, stateful services, backend build/deploy resources, routes, and LiveKit networking. |
+| Validation | Go tests, TypeScript, native asset checks, Playwright | Tests cover backend behavior, deployment assumptions, native project assets, mobile build assumptions, and screen rendering. |
 
 ## Runtime Components
 
@@ -94,7 +166,10 @@ It provides:
 - emoji quick actions
 - compact cat meme quick messages
 - call buttons for LiveKit-backed voice/video rooms
-- incoming-call UI while the app is active, using the platform sound path
+- incoming-call UI while the app is active, using bundled `rockstar.mp3`
+- phone-style full-screen voice/video calls
+- contact icon and `Calling <contact-name>` header during calls
+- bottom-right self camera preview during video calls
 - native Android and iOS projects for IDE/device builds
 
 Important environment variables:
@@ -127,6 +202,8 @@ EXPO_PUBLIC_LIVEKIT_URL=ws://localhost:7880
 
 For physical devices, use an address reachable from the device over LAN or VPN. Do not use `localhost` unless the API is running on the device itself.
 
+Native release builds default LiveKit to `ws://192.168.1.88:7880` so Android and iOS use the same reachable WebRTC endpoint. Local Docker LiveKit uses `deploy/local/livekit.yaml` to advertise `192.168.1.88`, TCP `7881`, and UDP `50100-50120`.
+
 Debug physical-device builds should point at the private OpenShift API:
 
 ```sh
@@ -141,10 +218,12 @@ npm run android:openshift -w apps/mobile
 npm run ios:openshift -w apps/mobile
 ```
 
-Emulator/simulator builds default to the laptop-local Docker Compose stack:
+Emulator/simulator API defaults point at the laptop-local Docker Compose stack:
 
 - Android emulator: `http://10.0.2.2:4000`
 - iOS Simulator: `http://localhost:4000`
+
+Always install release builds on Android emulators, Android devices, iOS simulators, and iOS devices. Debug builds should be reserved for Metro or native tooling work.
 
 ### Go Backend
 
@@ -205,7 +284,7 @@ The OpenShift service receives a MetalLB IP from the libvirt network. The host r
 
 The app/backend integration point is already present: the backend issues LiveKit JWTs from `/calls/token`.
 
-The current app keeps calls in the foreground app experience. Native full-screen incoming calls while the app is suspended still require production push infrastructure: APNs/PushKit plus CallKit on iOS, and FCM plus high-priority notifications or ConnectionService on Android.
+The app keeps calls in the foreground app experience. Native full-screen incoming calls while the app is suspended still require production push infrastructure: APNs/PushKit plus CallKit on iOS, and FCM plus high-priority notifications or ConnectionService on Android.
 
 ## Local Development
 
@@ -379,7 +458,7 @@ displayName
 
 Returns a LiveKit JWT for the requested room.
 
-The current mobile call path verifies signaling, LiveKit token minting, room join, and microphone/camera permissions. A full in-call video grid and remote participant surface is still a separate UI task.
+The current mobile call path verifies signaling, LiveKit token minting, room join, microphone/camera permissions, full-screen call UI, remote video rendering, and local camera preview.
 
 ## Testing Strategy
 

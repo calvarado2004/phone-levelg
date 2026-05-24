@@ -79,7 +79,7 @@ registerLiveKitGlobals?.();
 
 const OPENSHIFT_API_URL = "https://phone-levelg-server-phone-levelg.apps.ocp-think.levelg.io";
 const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? OPENSHIFT_API_URL;
-const DEFAULT_LIVEKIT_URL = Platform.OS === "android" ? "ws://10.0.2.2:7880" : "ws://localhost:7880";
+const DEFAULT_LIVEKIT_URL = Platform.OS === "web" ? "ws://localhost:7880" : "ws://192.168.1.88:7880";
 const LIVEKIT_URL = process.env.EXPO_PUBLIC_LIVEKIT_URL ?? DEFAULT_LIVEKIT_URL;
 const GOOGLE_CLIENT_ID =
   Platform.OS === "ios"
@@ -97,6 +97,7 @@ const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
 const STORED_SESSION_KEY = "phone-levelg.session.v1";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
+const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
 const ANDROID_STATUS_BAR_HEIGHT = Platform.OS === "android" ? NativeStatusBar.currentHeight ?? 0 : 0;
 const IOS_STATUS_BAR_HEIGHT = Platform.OS === "ios" ? 44 : 0;
 const TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT + IOS_STATUS_BAR_HEIGHT;
@@ -144,6 +145,11 @@ type IncomingCall = {
   roomId: string;
   sender: string;
   mode: "voice" | "video";
+};
+
+type CallPeer = {
+  displayName: string;
+  avatarURL?: string;
 };
 
 type SocketEvent =
@@ -216,6 +222,7 @@ export default function App() {
   const [unreadRoomIDs, setUnreadRoomIDs] = useState<string[]>([]);
   const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
   const [callMode, setCallMode] = useState<"voice" | "video">("voice");
+  const [callPeer, setCallPeer] = useState<CallPeer | null>(null);
   const [localVideoTrack, setLocalVideoTrack] = useState<LiveKitVideoTrack | undefined>();
   const [remoteVideoTrack, setRemoteVideoTrack] = useState<LiveKitVideoTrack | undefined>();
   const [cameraDeviceID, setCameraDeviceID] = useState<string | undefined>();
@@ -237,8 +244,8 @@ export default function App() {
   const activeRoomTitle = selectedMember?.displayName ?? "Home";
   const headerTitle = session ? `${activeRoomTitle} - ${session.displayName}` : activeRoomTitle;
   const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
-  const displayedVideoTrack = remoteVideoTrack ?? localVideoTrack;
-  const isFullScreenVideoCall = callActive && callMode === "video";
+  const callPeerName = callPeer?.displayName ?? activeRoomTitle;
+  const isFullScreenCall = callActive;
 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
@@ -501,6 +508,7 @@ export default function App() {
         setUnreadRoomIDs(current => current.filter(roomID => roomID !== payload.data.roomId));
         if (payload.data.roomId === activeRoomID) {
           setMessages([]);
+          setSelectedMember(null);
         }
       }
       if (payload.type === "call:ring" && payload.data.senderId !== session.userId) {
@@ -508,6 +516,7 @@ export default function App() {
         const callUUID = createCallUUID();
         const nextCall: IncomingCall = { callUUID, roomId: payload.data.roomId, sender: payload.data.sender, mode: ringMode };
         nativeCallsRef.current[callUUID] = nextCall;
+        setCallPeer({ displayName: payload.data.sender });
         setIncomingCall(nextCall);
         void displayNativeIncomingCall(nextCall);
         void startIncomingCallTone();
@@ -632,6 +641,7 @@ export default function App() {
     setUnreadRoomIDs([]);
     setIncomingCall(null);
     incomingCallRef.current = null;
+    setCallPeer(null);
     setConnected(false);
     setCallActive(false);
     setCallStatus("Ready");
@@ -671,12 +681,15 @@ export default function App() {
           method: "DELETE"
         });
         if (!response.ok) {
-          throw new Error("delete failed");
+          const errorText = await response.text().catch(() => "");
+          throw new Error(errorText || `delete failed with ${response.status}`);
         }
         setMessages([]);
         setUnreadRoomIDs(current => current.filter(roomID => roomID !== activeRoomID));
-      } catch {
-        Alert.alert("Chat not deleted", "The server did not delete this private chat. Check the connection and try again.");
+        setSelectedMember(null);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown delete error";
+        Alert.alert("Chat not deleted", `The server did not delete this private chat.\n\n${message}`);
       }
     };
 
@@ -697,6 +710,7 @@ export default function App() {
       await endCurrentCall({ announce: false, status: "Switching call" });
     }
     activeCallRoomIDRef.current = roomID;
+    setCallPeer(resolveCallPeer(roomID));
     if (!activeCallUUIDRef.current) {
       const callUUID = createCallUUID();
       activeCallUUIDRef.current = callUUID;
@@ -842,6 +856,7 @@ export default function App() {
     setLocalVideoTrack(undefined);
     setRemoteVideoTrack(undefined);
     setCameraDeviceID(undefined);
+    setCallPeer(null);
     await resetAudioSession();
     setCallActive(false);
     setCallStatus(status);
@@ -860,12 +875,14 @@ export default function App() {
     await stopIncomingCallTone();
     setIncomingCall(null);
     incomingCallRef.current = null;
+    setCallPeer(null);
   }
 
   async function acceptIncomingCall() {
     if (!incomingCall) return;
     const nextCall = incomingCall;
     activeCallUUIDRef.current = nextCall.callUUID;
+    setCallPeer({ displayName: nextCall.sender });
     setIncomingCall(null);
     await joinCall(nextCall.mode, nextCall.roomId, false);
     getNativeCallKeep()?.setCurrentCallActive?.(nextCall.callUUID);
@@ -884,7 +901,7 @@ export default function App() {
         content: {
           title: call?.mode === "video" ? "Incoming video call" : "Incoming voice call",
           body: call?.sender ? `${call.sender} is calling on Phone LevelG` : "Phone LevelG call",
-          sound: "defaultRingtone",
+          sound: DEFAULT_RINGTONE_SOUND,
           priority: Notifications.AndroidNotificationPriority.MAX
         },
         trigger: Platform.OS === "android" ? { channelId: INCOMING_CALL_CHANNEL_ID } : null
@@ -914,11 +931,12 @@ export default function App() {
     }
 
     if (Platform.OS === "android") {
+      await Notifications.deleteNotificationChannelAsync(INCOMING_CALL_CHANNEL_ID).catch(() => undefined);
       await Notifications.setNotificationChannelAsync(INCOMING_CALL_CHANNEL_ID, {
         name: "Incoming calls",
         importance: Notifications.AndroidImportance.MAX,
         vibrationPattern: [0, 750, 350],
-        sound: "defaultRingtone"
+        sound: DEFAULT_RINGTONE_SOUND
       });
     }
   }
@@ -1010,6 +1028,26 @@ export default function App() {
     });
   }
 
+  function resolveCallPeer(roomID: string): CallPeer {
+    if (!session) {
+      return { displayName: activeRoomTitle };
+    }
+
+    if (selectedMember && roomID === directRoomID(session.userId, selectedMember.id)) {
+      return { displayName: selectedMember.displayName, avatarURL: selectedMember.avatarURL };
+    }
+
+    if (roomID.startsWith("dm:")) {
+      const peerID = roomID.split(":").find(part => part !== "dm" && part !== session.userId);
+      const peer = members.find(member => member.id === peerID);
+      if (peer) {
+        return { displayName: peer.displayName, avatarURL: peer.avatarURL };
+      }
+    }
+
+    return { displayName: activeRoomTitle };
+  }
+
   if (!session) {
     return (
       <View style={styles.shell}>
@@ -1087,19 +1125,53 @@ export default function App() {
     );
   }
 
-  if (isFullScreenVideoCall) {
+  if (isFullScreenCall) {
     return (
       <View style={styles.fullScreenCall}>
         <ExpoStatusBar style="light" />
-        <View style={styles.fullScreenVideoFrame}>
-          {displayedVideoTrack ? (
-            <CameraStreamView key={displayedVideoTrack.sid} track={displayedVideoTrack} mirror={!remoteVideoTrack} zOrder={0} />
-          ) : (
-            <View style={styles.fullScreenVideoPlaceholder}>
-              <Video color="#c4b5fd" size={36} />
+        {callMode === "video" ? (
+          <View style={styles.fullScreenVideoFrame}>
+            {remoteVideoTrack ? (
+              <CameraStreamView key={remoteVideoTrack.sid} track={remoteVideoTrack} zOrder={0} />
+            ) : (
+              <View style={styles.fullScreenVideoPlaceholder}>
+                <Video color="#d8ccff" size={36} />
+                <Text style={styles.fullScreenPlaceholderText}>Waiting for video</Text>
+              </View>
+            )}
+          </View>
+        ) : (
+          <View style={styles.fullScreenVoiceFrame}>
+            <View style={styles.voiceAvatar}>
+              <UserAvatar displayName={callPeerName} avatarURL={callPeer?.avatarURL} size={118} textStyle={styles.voiceAvatarText} />
             </View>
-          )}
+          </View>
+        )}
+        <View style={styles.fullScreenCallHeader}>
+          <View style={styles.fullScreenPeerAvatar}>
+            <UserAvatar displayName={callPeerName} avatarURL={callPeer?.avatarURL} size={44} textStyle={styles.fullScreenPeerAvatarText} />
+          </View>
+          <View style={styles.fullScreenPeerText}>
+            <Text style={styles.fullScreenCallingText} numberOfLines={1}>Calling {callPeerName}</Text>
+            <Text style={styles.fullScreenStatusText} numberOfLines={1}>{callStatus}</Text>
+          </View>
         </View>
+        {callMode === "video" && localVideoTrack && (
+          <View style={styles.fullScreenLocalVideoFrame}>
+            <CameraStreamView key={localVideoTrack.sid} track={localVideoTrack} mirror zOrder={1} />
+          </View>
+        )}
+        {callMode === "video" && (
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Switch camera"
+            hitSlop={12}
+            style={styles.fullScreenFlipCameraButton}
+            onPress={() => void flipCamera()}
+          >
+            <SwitchCamera color="#ffffff" size={22} />
+          </Pressable>
+        )}
         <Pressable
           accessibilityRole="button"
           accessibilityLabel="End call"
@@ -1183,48 +1255,6 @@ export default function App() {
                 <Phone color="#ffffff" size={24} />
               </Pressable>
             </View>
-          </View>
-        )}
-
-        {callActive && callMode === "video" && (
-          <View style={styles.videoCallStage}>
-            <View style={styles.remoteVideoFrame}>
-              {displayedVideoTrack ? (
-                <CameraStreamView key={displayedVideoTrack.sid} track={displayedVideoTrack} mirror={!remoteVideoTrack} zOrder={0} />
-              ) : (
-                <View style={styles.videoPlaceholder}>
-                  <Video color="#c4b5fd" size={32} />
-                  <Text style={styles.videoPlaceholderTitle}>Starting camera</Text>
-                  <Text style={styles.videoPlaceholderText}>Camera preview will appear here.</Text>
-                </View>
-              )}
-            </View>
-            {remoteVideoTrack && localVideoTrack && (
-              <View style={styles.localVideoFrame}>
-                <CameraStreamView key={localVideoTrack.sid} track={localVideoTrack} mirror zOrder={1} />
-              </View>
-            )}
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Switch camera"
-              hitSlop={12}
-              style={styles.flipCameraButton}
-              onPress={() => void flipCamera()}
-            >
-              <SwitchCamera color="#ffffff" size={20} />
-            </Pressable>
-          </View>
-        )}
-
-        {callActive && (
-          <View style={styles.callBanner}>
-            <View>
-              <Text style={styles.callTitle}>{callMode === "video" ? "Encrypted video call" : "Encrypted voice call"}</Text>
-              <Text style={styles.callMeta}>{callParticipantLabel(callMode, remoteParticipantCount)}</Text>
-            </View>
-            <Pressable style={styles.hangupButton} onPress={leaveCall}>
-              <PhoneOff color="#ffffff" size={18} />
-            </Pressable>
           </View>
         )}
 
@@ -1646,11 +1676,88 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "#000000"
   },
+  fullScreenVoiceFrame: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#10131a"
+  },
   fullScreenVideoPlaceholder: {
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#140a24"
+  },
+  fullScreenPlaceholderText: {
+    color: "#d8ccff",
+    fontSize: 15,
+    fontWeight: "800",
+    marginTop: 12
+  },
+  fullScreenCallHeader: {
+    position: "absolute",
+    top: TOP_SAFE_AREA_HEIGHT + 14,
+    left: 18,
+    right: 18,
+    minHeight: 58,
+    borderRadius: 18,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    backgroundColor: "rgba(15, 23, 32, 0.72)"
+  },
+  fullScreenPeerAvatar: {
+    width: 44,
+    height: 44,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#d8ccff",
+    overflow: "hidden"
+  },
+  fullScreenPeerAvatarText: {
+    color: "#24123d",
+    fontSize: 15,
+    fontWeight: "900"
+  },
+  fullScreenPeerText: {
+    flex: 1,
+    minWidth: 0
+  },
+  fullScreenCallingText: {
+    color: "#ffffff",
+    fontSize: 20,
+    fontWeight: "900"
+  },
+  fullScreenStatusText: {
+    color: "#d1d5db",
+    fontSize: 13,
+    fontWeight: "700",
+    marginTop: 2
+  },
+  fullScreenLocalVideoFrame: {
+    position: "absolute",
+    right: 16,
+    bottom: 126,
+    width: 116,
+    height: 162,
+    borderRadius: 18,
+    overflow: "hidden",
+    borderWidth: 2,
+    borderColor: "#ffffff",
+    backgroundColor: "#111827"
+  },
+  fullScreenFlipCameraButton: {
+    position: "absolute",
+    left: 24,
+    bottom: 46,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(15, 23, 32, 0.72)"
   },
   fullScreenHangupButton: {
     position: "absolute",
@@ -1662,6 +1769,20 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#dc2626"
+  },
+  voiceAvatar: {
+    width: 118,
+    height: 118,
+    borderRadius: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    backgroundColor: "#d8ccff"
+  },
+  voiceAvatarText: {
+    color: "#24123d",
+    fontSize: 38,
+    fontWeight: "900"
   },
   header: {
     minHeight: 76 + TOP_SAFE_AREA_HEIGHT,

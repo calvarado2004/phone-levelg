@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
+		2F3F8A992F4D47A59A1A0001 /* rockstar.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = 2F3F8A982F4D47A59A1A0001 /* rockstar.mp3 */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
 		86A8557057E45559A0317E58 /* libPods-PhoneLevelG.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 635D24DDAF138879737AFBE1 /* libPods-PhoneLevelG.a */; };
 		919569029FA9BD11AB021030 /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = E76B5C08C2423E801908D36F /* ExpoModulesProvider.swift */; };
@@ -22,6 +23,7 @@
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = PhoneLevelG/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = PhoneLevelG/Info.plist; sourceTree = "<group>"; };
 		15A91EB1474F82A61B30528F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = PhoneLevelG/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		2F3F8A982F4D47A59A1A0001 /* rockstar.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; name = rockstar.mp3; path = PhoneLevelG/rockstar.mp3; sourceTree = "<group>"; };
 		5CE986E4B8BD12E0D8475388 /* Pods-PhoneLevelG.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-PhoneLevelG.debug.xcconfig"; path = "Target Support Files/Pods-PhoneLevelG/Pods-PhoneLevelG.debug.xcconfig"; sourceTree = "<group>"; };
 		635D24DDAF138879737AFBE1 /* libPods-PhoneLevelG.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-PhoneLevelG.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = PhoneLevelG/SplashScreen.storyboard; sourceTree = "<group>"; };
@@ -71,6 +73,7 @@
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */,
 				15A91EB1474F82A61B30528F /* PrivacyInfo.xcprivacy */,
+				2F3F8A982F4D47A59A1A0001 /* rockstar.mp3 */,
 			);
 			name = PhoneLevelG;
 			sourceTree = "<group>";
@@ -197,6 +200,7 @@
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */,
 				F58EF5D62F44F0E1696F1672 /* PrivacyInfo.xcprivacy in Resources */,
+				2F3F8A992F4D47A59A1A0001 /* rockstar.mp3 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

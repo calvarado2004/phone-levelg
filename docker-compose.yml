@@ -19,11 +19,13 @@ services:
 
   livekit:
     image: docker.io/livekit/livekit-server:latest
-    command: ["--dev", "--bind", "0.0.0.0"]
+    command: ["--config", "/etc/livekit/livekit.yaml"]
     ports:
       - "7880:7880"
       - "7881:7881"
-      - "50000-50020:50000-50020/udp"
+      - "50100-50120:50100-50120/udp"
+    volumes:
+      - ./deploy/local/livekit.yaml:/etc/livekit/livekit.yaml:ro
 
   postgres:
     image: docker.io/library/postgres:18-alpine

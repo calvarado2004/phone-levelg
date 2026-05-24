@@ -16,7 +16,7 @@ React Native / Expo client for iOS and Android.
 - 30-day local session persistence.
 - Header logout.
 - User photos from Google profile pictures with initials fallback.
-- Incoming call alerts use the platform notification sound path instead of a bundled ringtone.
+- Incoming call alerts use the bundled `rockstar.mp3` ringtone through the native notification sound path.
 
 ## Runtime Configuration
 
@@ -35,6 +35,12 @@ https://phone-levelg-server-phone-levelg.apps.ocp-think.levelg.io
 ```
 
 For emulator-only local testing, enter the Docker Compose API URL in the server URL box. For physical devices, use a LAN, VPN, or OpenShift-reachable hostname instead of `localhost`.
+
+Native release builds default LiveKit to `ws://192.168.1.88:7880` so Android and iOS use the same reachable WebRTC endpoint. Keep local LiveKit configured with that node IP and the mapped UDP range before validating calls.
+
+## Installation
+
+Always install release builds on Android emulators, Android devices, iOS simulators, and iOS devices. Do not use debug builds for validation unless you are specifically debugging Metro or native development tooling.
 
 Google sign-in uses Expo AuthSession. Configure OAuth clients in Google Cloud for the app package/bundle ID and register the native redirect URI generated for the app scheme:
 
