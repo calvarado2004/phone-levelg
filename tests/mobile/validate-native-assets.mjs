@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 
 const gradleWrapper = readFileSync("apps/mobile/android/gradle/wrapper/gradle-wrapper.properties", "utf8");
@@ -28,6 +29,10 @@ const androidCallActionReceiver = readFileSync("apps/mobile/android/app/src/main
 const androidFirebaseMessagingService = readFileSync("apps/mobile/android/app/src/main/java/io/levelg/phone/PhoneLevelGFirebaseMessagingService.kt", "utf8");
 const androidStyles = readFileSync("apps/mobile/android/app/src/main/res/values/styles.xml", "utf8");
 const adaptiveIcon = readFileSync("apps/mobile/android/app/src/main/res/drawable/ic_launcher_foreground.xml", "utf8");
+
+function plistValue(path, key) {
+  return execFileSync("plutil", ["-extract", key, "raw", path], { encoding: "utf8" }).trim();
+}
 const androidIcon = readFileSync("apps/mobile/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", "utf8");
 
 assert.match(gradleWrapper, /gradle-8\.14\.3-bin\.zip/, "Android Gradle wrapper must stay on a React Native compatible Gradle version");
@@ -267,6 +272,11 @@ if (iosGoogleServicePlist) {
   assert.match(iosGoogleServicePlist, /<key>REVERSED_CLIENT_ID<\/key>\s*<string>[^<]+<\/string>/, "Local iOS GoogleService-Info.plist must include REVERSED_CLIENT_ID for release builds");
 }
 if (builtIOSInfoPlist) {
+  if (iosGoogleServicePlist) {
+    const googleReversedClientID = plistValue(iosGoogleServicePlistPath, "REVERSED_CLIENT_ID");
+    const builtGoogleURLScheme = plistValue(builtIOSInfoPlistPath, "CFBundleURLTypes.0.CFBundleURLSchemes.2");
+    assert.equal(builtGoogleURLScheme, googleReversedClientID, "Built iOS release Info.plist must include the Google reversed client ID URL scheme");
+  }
   assert.doesNotMatch(builtIOSInfoPlist, /<string><\/string>/, "Built iOS release Info.plist must not contain an empty URL scheme");
   assert.doesNotMatch(builtIOSInfoPlist, /<string>\$\(GOOGLE_REVERSED_CLIENT_ID\)<\/string>/, "Built iOS release Info.plist must expand GOOGLE_REVERSED_CLIENT_ID");
 }

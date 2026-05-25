@@ -9,6 +9,7 @@
     "dev:server": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go run ./cmd/server",
     "dev:mobile": "npm run start -w apps/mobile",
     "dev:mobile:openshift": "EXPO_PUBLIC_API_URL=https://phone-levelg-server-phone-levelg.apps.ocp-think.levelg.io EXPO_PUBLIC_LIVEKIT_URL=ws://192.168.1.88:7880 npm run start -w apps/mobile -- --host lan --port 8081 --clear",
+    "android:release-server": "./scripts/build-and-serve-android-release.sh",
     "typecheck": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./... && cd ../.. && npm run typecheck --workspaces --if-present",
     "test:server": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./...",
     "test:container": "docker build -f apps/server/Dockerfile .",
