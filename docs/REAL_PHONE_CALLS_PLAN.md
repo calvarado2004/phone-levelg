@@ -73,12 +73,12 @@ sequenceDiagram
 
 ### iOS PushKit And CallKit
 
-- [ ] Add native PushKit registration.
-- [ ] Send VoIP token to `/devices/register`.
-- [ ] Handle VoIP push while app is suspended.
-- [ ] Immediately report incoming call through CallKit.
-- [ ] Wire CallKit accept to LiveKit join.
-- [ ] Wire CallKit decline/end to backend `call:reject` / `call:end`.
+- [x] Add native PushKit registration.
+- [x] Send VoIP token to `/devices/register`.
+- [x] Handle VoIP push while app is suspended.
+- [x] Immediately report incoming call through CallKit.
+- [x] Wire CallKit accept to LiveKit join.
+- [x] Wire CallKit decline/end to backend `call:reject` / `call:end`.
 - [ ] Clear stale CallKit calls on expiration or remote end.
 - [ ] Validate on a locked physical iPhone.
 
@@ -123,7 +123,9 @@ sequenceDiagram
 - [x] Add native project validation for Android full-screen call activity, notification, ringtone, and action wiring.
 - [x] Add native project validation for Android Firebase Messaging background-call handling.
 - [x] Add native project validation for Android native Answer deep-link handling.
-- [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
+- [x] Add iOS native validation hooks for PushKit registration, CallKit reporting, and CallKit event recovery.
+- [x] Add iOS native validation hooks for PushKit token bridging and backend registration.
+- [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
 

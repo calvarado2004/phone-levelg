@@ -13,6 +13,8 @@ import {
   KeyboardAvoidingView,
   Linking,
   LogBox,
+  NativeEventEmitter,
+  NativeModules,
   Platform,
   PermissionsAndroid,
   Pressable,
@@ -64,6 +66,8 @@ const registerLiveKitGlobals = Platform.OS === "web"
   ? undefined
   : (require("@livekit/react-native") as { registerGlobals: () => void }).registerGlobals;
 let cachedNativeCallKeep: any | null | undefined;
+const nativeVoIPTokenModule: { getToken?: () => Promise<string> } | undefined =
+  Platform.OS === "ios" ? NativeModules.PhoneLevelGVoIPToken : undefined;
 
 function getNativeCallKeep() {
   if (Platform.OS !== "ios") return undefined;
@@ -161,6 +165,17 @@ type IncomingCallPayload = {
   sender: string;
   mode: "voice" | "video";
   expiresAt?: string;
+};
+
+type NativeCallKeepIncomingCallEvent = {
+  callUUID?: string;
+  fromPushKit?: string;
+  payload?: unknown;
+};
+
+type NativeCallKeepDelayedEvent = {
+  name?: string;
+  data?: NativeCallKeepIncomingCallEvent;
 };
 
 type CallPeer = {
@@ -305,6 +320,15 @@ export default function App() {
   }, [apiURL, session]);
 
   useEffect(() => {
+    if (!session || Platform.OS !== "ios" || E2E_MODE || !nativeVoIPTokenModule) return;
+    const emitter = new NativeEventEmitter(nativeVoIPTokenModule as any);
+    const subscription = emitter.addListener("PhoneLevelGVoIPTokenUpdated", () => {
+      void registerDeviceForPush(session, apiURL);
+    });
+    return () => subscription.remove();
+  }, [apiURL, session]);
+
+  useEffect(() => {
     if (!session || E2E_MODE || !supportsNativePushRegistration()) return;
     const receivedSubscription = Notifications.addNotificationReceivedListener(notification => {
       void showIncomingCallFromPayload(notification.request.content.data, "native-push");
@@ -327,6 +351,16 @@ export default function App() {
       }),
       nativeCallKeep.addEventListener("endCall", ({ callUUID }: { callUUID: string }) => {
         void endNativeCall(callUUID);
+      }),
+      nativeCallKeep.addEventListener("didDisplayIncomingCall", (event: NativeCallKeepIncomingCallEvent) => {
+        trackNativeCallKeepIncomingCall(event);
+      }),
+      nativeCallKeep.addEventListener("didLoadWithEvents", (events: NativeCallKeepDelayedEvent[]) => {
+        events.forEach(event => {
+          if (event.name === "RNCallKeepDidDisplayIncomingCall" && event.data) {
+            trackNativeCallKeepIncomingCall(event.data);
+          }
+        });
       }),
       nativeCallKeep.addEventListener("didActivateAudioSession", () => {
         void setIsAudioActiveAsync(true);
@@ -486,6 +520,22 @@ export default function App() {
     getNativeCallKeep()?.setCurrentCallActive?.(callUUID);
   }
 
+  function trackNativeCallKeepIncomingCall(event: NativeCallKeepIncomingCallEvent) {
+    if (event.fromPushKit !== "1" || !event.callUUID) return;
+    const payload = normalizeIncomingCallPayload(event.payload);
+    if (!payload || isExpiredCall(payload.expiresAt)) return;
+    nativeCallsRef.current[event.callUUID] = {
+      callUUID: event.callUUID,
+      callId: payload.callId,
+      roomId: payload.roomId,
+      senderId: payload.senderId,
+      sender: payload.sender,
+      mode: payload.mode,
+      expiresAt: payload.expiresAt
+    };
+    handledCallIDsRef.current.add(payload.callId);
+  }
+
   async function acceptNativeIncomingCallPayload(payload: IncomingCallPayload) {
     if (!session) {
       pendingNativeAcceptRef.current = payload;
@@ -534,7 +584,13 @@ export default function App() {
     }
 
     if (incomingCallRef.current?.callUUID === callUUID || call) {
-      await declineIncomingCall({ announce: true });
+      if (incomingCallRef.current?.callUUID === callUUID) {
+        await declineIncomingCall({ announce: true });
+        return;
+      }
+      sendSocket("call:reject", { roomId: call.roomId });
+      await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
+      setCallPeer(null);
     }
   }
 
@@ -1802,6 +1858,11 @@ async function getPersistentDeviceID() {
   return nextDeviceID;
 }
 
+async function getPersistentVoIPDeviceID() {
+  const deviceID = await getPersistentDeviceID();
+  return `${deviceID}:voip`;
+}
+
 function pushTokenTypeForPlatform(type: string) {
   if (type === "ios") return "apns";
   if (type === "android") return "fcm";
@@ -1815,6 +1876,8 @@ function serializePushTokenData(data: unknown) {
 
 async function registerDeviceForPush(nextSession: Session, apiURL: string) {
   if (E2E_MODE || !supportsNativePushRegistration()) return;
+
+  await registerVoIPDeviceForPush(nextSession, apiURL).catch(() => undefined);
 
   try {
     const currentPermissions = await Notifications.getPermissionsAsync();
@@ -1842,6 +1905,26 @@ async function registerDeviceForPush(nextSession: Session, apiURL: string) {
   }
 }
 
+async function registerVoIPDeviceForPush(nextSession: Session, apiURL: string) {
+  if (Platform.OS !== "ios" || !nativeVoIPTokenModule?.getToken) return;
+
+  const pushToken = await nativeVoIPTokenModule.getToken();
+  if (!pushToken) return;
+
+  await fetch(`${apiURL}/devices/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      userId: nextSession.userId,
+      deviceId: await getPersistentVoIPDeviceID(),
+      platform: "ios",
+      pushToken,
+      pushTokenType: "apns-voip",
+      appVersion: "0.1.0"
+    })
+  });
+}
+
 async function unregisterDeviceForPush(nextSession: Session, apiURL: string) {
   if (E2E_MODE || !supportsNativePushRegistration()) return;
 
@@ -1852,9 +1935,18 @@ async function unregisterDeviceForPush(nextSession: Session, apiURL: string) {
     await fetch(`${apiURL}/devices/${encodeURIComponent(deviceID)}?userId=${encodeURIComponent(nextSession.userId)}`, {
       method: "DELETE"
     });
+    if (Platform.OS === "ios") {
+      await unregisterVoIPDeviceForPush(nextSession, apiURL, deviceID);
+    }
   } catch {
     // Logout must continue even if the backend cannot remove the stale token.
   }
+}
+
+async function unregisterVoIPDeviceForPush(nextSession: Session, apiURL: string, deviceID: string) {
+  await fetch(`${apiURL}/devices/${encodeURIComponent(`${deviceID}:voip`)}?userId=${encodeURIComponent(nextSession.userId)}`, {
+    method: "DELETE"
+  }).catch(() => undefined);
 }
 
 function normalizeServerURL(value: string) {

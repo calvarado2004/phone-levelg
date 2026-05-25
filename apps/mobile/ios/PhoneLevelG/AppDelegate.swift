@@ -1,4 +1,5 @@
 internal import Expo
+import PushKit
 import React
 import ReactAppDependencyProvider
 
@@ -8,6 +9,7 @@ class AppDelegate: ExpoAppDelegate {
 
   var reactNativeDelegate: ExpoReactNativeFactoryDelegate?
   var reactNativeFactory: RCTReactNativeFactory?
+  var voipRegistry: PKPushRegistry?
 
   public override func application(
     _ application: UIApplication,
@@ -27,6 +29,9 @@ class AppDelegate: ExpoAppDelegate {
       in: window,
       launchOptions: launchOptions)
 #endif
+
+    setupNativeCallProvider()
+    registerForVoIPPushes()
 
     return super.application(application, didFinishLaunchingWithOptions: launchOptions)
   }
@@ -48,6 +53,92 @@ class AppDelegate: ExpoAppDelegate {
   ) -> Bool {
     let result = RCTLinkingManager.application(application, continue: userActivity, restorationHandler: restorationHandler)
     return super.application(application, continue: userActivity, restorationHandler: restorationHandler) || result
+  }
+}
+
+extension AppDelegate: PKPushRegistryDelegate {
+  func pushRegistry(
+    _ registry: PKPushRegistry,
+    didUpdate pushCredentials: PKPushCredentials,
+    for type: PKPushType
+  ) {
+    guard type == .voIP else { return }
+    let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
+    UserDefaults.standard.set(token, forKey: "phone-levelg.apnsVoipToken")
+    NotificationCenter.default.post(
+      name: Notification.Name("PhoneLevelGVoIPTokenUpdated"),
+      object: nil,
+      userInfo: ["token": token]
+    )
+  }
+
+  func pushRegistry(
+    _ registry: PKPushRegistry,
+    didInvalidatePushTokenFor type: PKPushType
+  ) {
+    guard type == .voIP else { return }
+    UserDefaults.standard.removeObject(forKey: "phone-levelg.apnsVoipToken")
+    NotificationCenter.default.post(
+      name: Notification.Name("PhoneLevelGVoIPTokenUpdated"),
+      object: nil,
+      userInfo: ["token": ""]
+    )
+  }
+
+  func pushRegistry(
+    _ registry: PKPushRegistry,
+    didReceiveIncomingPushWith payload: PKPushPayload,
+    for type: PKPushType,
+    completion: @escaping () -> Void
+  ) {
+    guard type == .voIP else {
+      completion()
+      return
+    }
+
+    let data = payload.dictionaryPayload
+    guard data["callId"] is String, let roomID = data["roomId"] as? String else {
+      completion()
+      return
+    }
+
+    let callUUID = UUID().uuidString.lowercased()
+    var callPayload = data
+    callPayload["callUUID"] = callUUID
+
+    RNCallKeep.reportNewIncomingCall(
+      callUUID,
+      handle: roomID,
+      handleType: "generic",
+      hasVideo: (data["mode"] as? String) == "video",
+      localizedCallerName: data["sender"] as? String ?? "Phone LevelG",
+      supportsHolding: false,
+      supportsDTMF: false,
+      supportsGrouping: false,
+      supportsUngrouping: false,
+      fromPushKit: true,
+      payload: callPayload,
+      withCompletionHandler: completion
+    )
+  }
+}
+
+private extension AppDelegate {
+  func setupNativeCallProvider() {
+    RNCallKeep.setup([
+      "ios": [
+        "appName": "Phone LevelG",
+        "supportsVideo": true,
+        "includesCallsInRecents": false
+      ]
+    ])
+  }
+
+  func registerForVoIPPushes() {
+    let registry = PKPushRegistry(queue: DispatchQueue.main)
+    registry.delegate = self
+    registry.desiredPushTypes = [.voIP]
+    voipRegistry = registry
   }
 }
 

@@ -5,6 +5,8 @@ test-results/
 playwright-report/
 dist/
 build/
+DerivedData*/
+apps/mobile/ios/DerivedData*/
 .DS_Store
 *.log
 .env
