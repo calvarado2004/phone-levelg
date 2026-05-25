@@ -148,11 +148,10 @@ OpenShift runs only backend and infrastructure:
 
 Mobile release binaries are built and installed outside OpenShift. OpenShift BuildConfigs must remain Git-sourced; binary uploads of local build directories or mobile artifacts are not part of the deployment model.
 
-## Remaining Risk
+## Remaining Validation
 
-The code and cluster now have the native push providers configured and live message-push tests have succeeded. The remaining required validation is physical-device behavior while locked, backgrounded, and force-closed where iOS/Android allow delivery:
+The code and cluster now have the native push providers configured, live message-push tests have succeeded, and iPhone locked/background incoming calls were validated on May 25, 2026. Remaining validation:
 
-- iPhone locked/background incoming call
 - Android locked/background incoming call
 - foreground call regression after push-based entry
 - direct-chat cleanup regression against the deployed backend
