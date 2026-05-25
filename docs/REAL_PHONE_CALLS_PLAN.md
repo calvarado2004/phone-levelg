@@ -6,12 +6,13 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 
 - Current foreground calls work through WebSocket signaling plus LiveKit media.
 - Native wake-up delivery is implemented through APNs/PushKit + CallKit on iOS and FCM + full-screen incoming-call UI on Android.
+- iOS incoming calls now use one OS-level path: PushKit wakes the app and CallKit presents the call UI. The React Native incoming-call sheet and local ringtone are Android/foreground fallbacks only, which avoids duplicate native and in-app call surfaces on iPhone.
 - Call reject and no-answer events now carry the same call id as the outgoing ring, so the caller's attempt ends immediately with `Call rejected` or `No answer` instead of waiting ambiguously.
 - Locked/background validation remains the main open item: the latest release builds are installed, but both platforms still need repeated physical-device tests while locked, backgrounded, and force-closed.
 - Google account creation now uses the native Google Sign-In SDK on Android/iOS. AuthSession remains only for web/dev browser flows.
 - Message bodies are encrypted on the mobile client before backend persistence. The current phase is server-blind shared room encryption; per-device key exchange is the next hardening phase.
 - 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
-- 1-1 private-message notifications can use the bundled `message-notification.mp3` sound. The lobby intentionally remains silent.
+- 1-1 private-message notifications use backend APNs/FCM delivery with the bundled `message-notification.mp3` sound. The lobby intentionally remains silent.
 - Chat and attachment encryption now use a server-confirmed session key secret returned at login instead of mutable local invite-code UI state. The mobile session key was bumped so old broken sessions must sign in again.
 - Direct-chat delete and attachment endpoints now handle URL-encoded `dm:` room IDs, and mobile send/attachment buttons no longer depend on WebSocket state because persistence uses HTTP.
 - OpenShift backend deployment now uses a Git-sourced BuildConfig. Backend images are built by OpenShift build pods from committed GitHub source; mobile binaries, local build directories, and Secret objects must not be uploaded through the tracked runtime manifests.
@@ -98,6 +99,15 @@ sequenceDiagram
 - [x] Add tests that `call:ring` dispatches both WebSocket and native push work.
 - [x] Persist call attempts for retry/audit.
 - [x] Attach concrete APNs and FCM provider implementations.
+- [x] Keep iOS calls on VoIP APNs/CallKit only; regular APNs alerts are reserved for messages.
+
+### Backend Message Push Dispatch
+
+- [x] Keep WebSocket delivery as fast path for active direct-message recipients.
+- [x] Send native direct-message pushes through regular APNs alert tokens and FCM tokens.
+- [x] Do not send message pushes to the sender's devices.
+- [x] Do not use iOS VoIP tokens for chat notifications.
+- [x] Use the `private-messages` Android channel and `message-notification` sound.
 
 ### Push Providers And Secrets
 

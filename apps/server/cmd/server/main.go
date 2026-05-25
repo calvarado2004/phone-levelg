@@ -148,13 +148,26 @@ type callPushPayload struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
+type messagePushPayload struct {
+	MessageID string
+	RoomID    string
+	SenderID  string
+	Sender    string
+	Preview   string
+}
+
 type pushDispatcher interface {
 	DispatchCallPush(context.Context, callPushPayload, []pushDevice) error
+	DispatchMessagePush(context.Context, messagePushPayload, []pushDevice) error
 }
 
 type noopPushDispatcher struct{}
 
 func (noopPushDispatcher) DispatchCallPush(context.Context, callPushPayload, []pushDevice) error {
+	return nil
+}
+
+func (noopPushDispatcher) DispatchMessagePush(context.Context, messagePushPayload, []pushDevice) error {
 	return nil
 }
 
@@ -179,7 +192,7 @@ func (d compositePushDispatcher) DispatchCallPush(ctx context.Context, payload c
 	var lastErr error
 	for _, device := range devices {
 		switch device.PushTokenType {
-		case "apns", "apns-voip":
+		case "apns-voip":
 			if d.apns == nil {
 				slog.Info("skip apns call push; provider disabled", "deviceID", device.DeviceID, "userID", device.UserID)
 				continue
@@ -197,8 +210,43 @@ func (d compositePushDispatcher) DispatchCallPush(ctx context.Context, payload c
 				lastErr = err
 				slog.Error("send fcm call push", "deviceID", device.DeviceID, "userID", device.UserID, "error", err)
 			}
+		case "apns":
+			// iOS calls must arrive through PushKit/CallKit only; regular APNs alerts are for messages.
+			continue
 		default:
 			slog.Info("skip unsupported push token type", "deviceID", device.DeviceID, "pushTokenType", device.PushTokenType)
+		}
+	}
+	return lastErr
+}
+
+func (d compositePushDispatcher) DispatchMessagePush(ctx context.Context, payload messagePushPayload, devices []pushDevice) error {
+	var lastErr error
+	for _, device := range devices {
+		switch device.PushTokenType {
+		case "apns":
+			if d.apns == nil {
+				slog.Info("skip apns message push; provider disabled", "deviceID", device.DeviceID, "userID", device.UserID)
+				continue
+			}
+			if err := d.apns.SendMessagePush(ctx, payload, device); err != nil {
+				lastErr = err
+				slog.Error("send apns message push", "deviceID", device.DeviceID, "userID", device.UserID, "error", err)
+			}
+		case "fcm":
+			if d.fcm == nil {
+				slog.Info("skip fcm message push; provider disabled", "deviceID", device.DeviceID, "userID", device.UserID)
+				continue
+			}
+			if err := d.fcm.SendMessagePush(ctx, payload, device); err != nil {
+				lastErr = err
+				slog.Error("send fcm message push", "deviceID", device.DeviceID, "userID", device.UserID, "error", err)
+			}
+		case "apns-voip":
+			// VoIP pushes are reserved for real incoming calls so iOS can reliably report through CallKit.
+			continue
+		default:
+			slog.Info("skip unsupported message push token type", "deviceID", device.DeviceID, "pushTokenType", device.PushTokenType)
 		}
 	}
 	return lastErr
@@ -252,6 +300,40 @@ func (p *apnsProvider) SendCallPush(ctx context.Context, payload callPushPayload
 		topic += ".voip"
 	}
 	req.Header.Set("authorization", "bearer "+token)
+	req.Header.Set("apns-topic", topic)
+	req.Header.Set("apns-push-type", pushType)
+	req.Header.Set("apns-priority", "10")
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("apns returned %s", resp.Status)
+	}
+	return nil
+}
+
+func (p *apnsProvider) SendMessagePush(ctx context.Context, payload messagePushPayload, device pushDevice) error {
+	body, err := json.Marshal(apnsMessagePayload(payload))
+	if err != nil {
+		return err
+	}
+	return p.sendPush(ctx, device.PushToken, p.bundleID, "alert", body)
+}
+
+func (p *apnsProvider) sendPush(ctx context.Context, token, topic, pushType string, body []byte) error {
+	authToken, err := p.authorizationToken(time.Now())
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint+"/3/device/"+token, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("authorization", "bearer "+authToken)
 	req.Header.Set("apns-topic", topic)
 	req.Header.Set("apns-push-type", pushType)
 	req.Header.Set("apns-priority", "10")
@@ -325,6 +407,37 @@ func (p *fcmProvider) SendCallPush(ctx context.Context, payload callPushPayload,
 	if err != nil {
 		return err
 	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	accessToken, err := p.bearerToken(ctx)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("authorization", "Bearer "+accessToken)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("fcm returned %s", resp.Status)
+	}
+	return nil
+}
+
+func (p *fcmProvider) SendMessagePush(ctx context.Context, payload messagePushPayload, device pushDevice) error {
+	body, err := json.Marshal(fcmMessagePayload(payload, device.PushToken))
+	if err != nil {
+		return err
+	}
+	return p.sendPush(ctx, body)
+}
+
+func (p *fcmProvider) sendPush(ctx context.Context, body []byte) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
 	if err != nil {
 		return err
@@ -1564,12 +1677,56 @@ values ($1, $2, $3, $4, $5, $6)`,
 
 	envelope := outboundEnvelope{Type: "message:new", Data: msg}
 	s.publish(ctx, channel, envelope)
-	for _, recipient := range directMessageRecipients(roomID) {
+	recipients := directMessageRecipients(roomID)
+	for _, recipient := range recipients {
 		if recipient != senderID {
 			s.publish(ctx, "user:"+recipient, envelope)
 		}
 	}
+	s.dispatchNativeMessagePush(ctx, msg, recipients)
 	return msg, true
+}
+
+func (s *server) dispatchNativeMessagePush(ctx context.Context, msg message, recipients []string) {
+	filtered := make([]string, 0, len(recipients))
+	for _, recipient := range recipients {
+		if recipient != msg.SenderID {
+			filtered = append(filtered, recipient)
+		}
+	}
+	if len(filtered) == 0 {
+		return
+	}
+	dispatcher := s.push
+	if dispatcher == nil {
+		dispatcher = noopPushDispatcher{}
+	}
+	devices := s.pushDevicesForRecipients(ctx, filtered)
+	devices = messagePushDevices(devices)
+	if len(devices) == 0 {
+		return
+	}
+	payload := messagePushPayload{
+		MessageID: msg.ID,
+		RoomID:    msg.RoomID,
+		SenderID:  msg.SenderID,
+		Sender:    msg.Sender,
+		Preview:   "New private message",
+	}
+	if err := dispatcher.DispatchMessagePush(ctx, payload, devices); err != nil {
+		slog.Error("dispatch message push", "error", err)
+	}
+}
+
+func messagePushDevices(devices []pushDevice) []pushDevice {
+	filtered := make([]pushDevice, 0, len(devices))
+	for _, device := range devices {
+		switch device.PushTokenType {
+		case "apns", "fcm":
+			filtered = append(filtered, device)
+		}
+	}
+	return filtered
 }
 
 func apnsCallPayload(payload callPushPayload) map[string]any {
@@ -1592,6 +1749,23 @@ func apnsCallPayload(payload callPushPayload) map[string]any {
 	}
 }
 
+func apnsMessagePayload(payload messagePushPayload) map[string]any {
+	return map[string]any{
+		"aps": map[string]any{
+			"alert": map[string]string{
+				"title": payload.Sender,
+				"body":  payload.Preview,
+			},
+			"sound": "message-notification.mp3",
+		},
+		"type":      "message:new",
+		"messageId": payload.MessageID,
+		"roomId":    payload.RoomID,
+		"senderId":  payload.SenderID,
+		"sender":    payload.Sender,
+	}
+}
+
 func fcmCallPayload(payload callPushPayload, token string) map[string]any {
 	data := map[string]string{
 		"type":      "call:ring",
@@ -1608,6 +1782,32 @@ func fcmCallPayload(payload callPushPayload, token string) map[string]any {
 			"data":  data,
 			"android": map[string]any{
 				"priority": "HIGH",
+			},
+		},
+	}
+}
+
+func fcmMessagePayload(payload messagePushPayload, token string) map[string]any {
+	return map[string]any{
+		"message": map[string]any{
+			"token": token,
+			"notification": map[string]string{
+				"title": payload.Sender,
+				"body":  payload.Preview,
+			},
+			"data": map[string]string{
+				"type":      "message:new",
+				"messageId": payload.MessageID,
+				"roomId":    payload.RoomID,
+				"senderId":  payload.SenderID,
+				"sender":    payload.Sender,
+			},
+			"android": map[string]any{
+				"priority": "HIGH",
+				"notification": map[string]any{
+					"channel_id": "private-messages",
+					"sound":      "message_notification",
+				},
 			},
 		},
 	}

@@ -19,6 +19,7 @@ import {
   KeyboardAvoidingView,
   Linking,
   LogBox,
+  Modal,
   NativeEventEmitter,
   NativeModules,
   Platform,
@@ -307,6 +308,9 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [sendingAttachment, setSendingAttachment] = useState(false);
   const [privateMessageSoundEnabled, setPrivateMessageSoundEnabled] = useState(true);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [contactsOpen, setContactsOpen] = useState(false);
+  const [catMemesOpen, setCatMemesOpen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [callActive, setCallActive] = useState(false);
   const [callStatus, setCallStatus] = useState("Ready");
@@ -330,6 +334,8 @@ export default function App() {
   const [iosCallAlertPermission, setIOSCallAlertPermission] = useState<PermissionState>("unknown");
   const [iosMicPermission, setIOSMicPermission] = useState<PermissionState>("unknown");
   const [iosCameraPermission, setIOSCameraPermission] = useState<PermissionState>("unknown");
+  const [nativeCallEventTick, setNativeCallEventTick] = useState(0);
+  const [attachmentPreviewURIs, setAttachmentPreviewURIs] = useState<Record<string, string>>({});
   const socketRef = useRef<WebSocket | null>(null);
   const roomRef = useRef<Room | null>(null);
   const activeCallRoomIDRef = useRef<string | null>(null);
@@ -338,10 +344,15 @@ export default function App() {
   const incomingCallRef = useRef<IncomingCall | null>(null);
   const nativeCallsRef = useRef<Record<string, IncomingCall>>({});
   const handledCallIDsRef = useRef<Set<string>>(new Set());
+  const notifiedPrivateMessageIDsRef = useRef<Set<string>>(new Set());
+  const privateMessageSoundEnabledRef = useRef(true);
+  const loadingAttachmentPreviewIDsRef = useRef<Set<string>>(new Set());
   const incomingCallExpirationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outgoingCallTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callKeepReadyRef = useRef(false);
   const incomingCallNotificationRef = useRef<string | null>(null);
+  const pendingNativeAcceptCallUUIDRef = useRef<string | null>(null);
+  const pendingNativeEndCallUUIDRef = useRef<string | null>(null);
   const pendingNativeAcceptRef = useRef<IncomingCallPayload | null>(null);
   const pendingNativeDeclineRef = useRef<IncomingCallPayload | null>(null);
   const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
@@ -364,6 +375,23 @@ export default function App() {
   useEffect(() => {
     incomingCallRef.current = incomingCall;
   }, [incomingCall]);
+
+  useEffect(() => {
+    privateMessageSoundEnabledRef.current = privateMessageSoundEnabled;
+  }, [privateMessageSoundEnabled]);
+
+  useEffect(() => {
+    if (!session) {
+      loadingAttachmentPreviewIDsRef.current.clear();
+      setAttachmentPreviewURIs({});
+      return;
+    }
+    messages
+      .filter(message => message.attachment?.mimeType.startsWith("image/"))
+      .forEach(message => {
+        void loadAttachmentPreview(message);
+      });
+  }, [messages, session]);
 
   useEffect(() => {
     if (Platform.OS === "web" || !GOOGLE_WEB_CLIENT_ID) return;
@@ -400,6 +428,20 @@ export default function App() {
     pendingNativeAcceptRef.current = null;
     void acceptNativeIncomingCallPayload(payload);
   }, [session]);
+
+  useEffect(() => {
+    if (pendingNativeEndCallUUIDRef.current) {
+      const callUUID = pendingNativeEndCallUUIDRef.current;
+      pendingNativeEndCallUUIDRef.current = null;
+      void endNativeCall(callUUID);
+      return;
+    }
+
+    const callUUID = pendingNativeAcceptCallUUIDRef.current;
+    if (!session || !callUUID || !nativeCallsRef.current[callUUID]) return;
+    pendingNativeAcceptCallUUIDRef.current = null;
+    void acceptNativeIncomingCall(callUUID);
+  }, [nativeCallEventTick, session]);
 
   useEffect(() => {
     if (!session || !connected || !pendingNativeDeclineRef.current) return;
@@ -449,10 +491,10 @@ export default function App() {
     if (E2E_MODE || !nativeCallKeep) return;
     const listeners = [
       nativeCallKeep.addEventListener("answerCall", ({ callUUID }: { callUUID: string }) => {
-        void acceptNativeIncomingCall(callUUID);
+        queueNativeAnswerCall(callUUID);
       }),
       nativeCallKeep.addEventListener("endCall", ({ callUUID }: { callUUID: string }) => {
-        void endNativeCall(callUUID);
+        queueNativeEndCall(callUUID);
       }),
       nativeCallKeep.addEventListener("didDisplayIncomingCall", (event: NativeCallKeepIncomingCallEvent) => {
         trackNativeCallKeepIncomingCall(event);
@@ -461,6 +503,12 @@ export default function App() {
         events.forEach(event => {
           if (event.name === "RNCallKeepDidDisplayIncomingCall" && event.data) {
             trackNativeCallKeepIncomingCall(event.data);
+          }
+          if (event.name === "RNCallKeepPerformAnswerCallAction" && event.data?.callUUID) {
+            queueNativeAnswerCall(event.data.callUUID);
+          }
+          if (event.name === "RNCallKeepPerformEndCallAction" && event.data?.callUUID) {
+            queueNativeEndCall(event.data.callUUID);
           }
         });
       }),
@@ -589,7 +637,7 @@ export default function App() {
         { supportsHolding: false, supportsGrouping: false }
       );
     } catch {
-      // The in-app call sheet and system notification remain as fallback.
+      // CallKit is the single iOS incoming-call surface; failures are logged by native tooling.
     }
   }
 
@@ -613,10 +661,17 @@ export default function App() {
     };
     nativeCallsRef.current[nextCall.callUUID] = nextCall;
     setCallPeer({ displayName: nextCall.sender });
-    setIncomingCall(nextCall);
     await AsyncStorage.setItem(STORED_PENDING_CALL_KEY, JSON.stringify(nextCall)).catch(() => undefined);
     scheduleIncomingCallExpiration(nextCall);
     void displayNativeIncomingCall(nextCall);
+    if (Platform.OS === "ios") {
+      if (source === "native-push") {
+        void refreshMembers();
+      }
+      return;
+    }
+
+    setIncomingCall(nextCall);
     void startIncomingCallTone();
 
     if (source === "native-push") {
@@ -638,10 +693,12 @@ export default function App() {
       handledCallIDsRef.current.add(nextCall.callId);
       nativeCallsRef.current[nextCall.callUUID] = nextCall;
       setCallPeer({ displayName: nextCall.sender });
-      setIncomingCall(nextCall);
       scheduleIncomingCallExpiration(nextCall);
       void displayNativeIncomingCall(nextCall);
-      void startIncomingCallTone();
+      if (Platform.OS !== "ios") {
+        setIncomingCall(nextCall);
+        void startIncomingCallTone();
+      }
     } catch {
       await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     }
@@ -669,9 +726,27 @@ export default function App() {
     }
   }
 
+  function queueNativeAnswerCall(callUUID: string) {
+    pendingNativeAcceptCallUUIDRef.current = callUUID;
+    setNativeCallEventTick(current => current + 1);
+  }
+
+  function queueNativeEndCall(callUUID: string) {
+    pendingNativeEndCallUUIDRef.current = callUUID;
+    setNativeCallEventTick(current => current + 1);
+  }
+
   async function acceptNativeIncomingCall(callUUID: string) {
     const call = nativeCallsRef.current[callUUID] ?? incomingCallRef.current;
-    if (!call) return;
+    if (!call || !session) {
+      pendingNativeAcceptCallUUIDRef.current = callUUID;
+      return;
+    }
+    if (call.senderId === session.userId || isExpiredCall(call.expiresAt)) {
+      clearNativeCall(call, "end");
+      return;
+    }
+    if (activeCallRoomIDRef.current === call.roomId) return;
 
     activeCallUUIDRef.current = callUUID;
     activeCallIDRef.current = call.callId;
@@ -703,6 +778,7 @@ export default function App() {
     nativeCallsRef.current[event.callUUID] = call;
     handledCallIDsRef.current.add(payload.callId);
     scheduleIncomingCallExpiration(call);
+    setNativeCallEventTick(current => current + 1);
   }
 
   async function acceptNativeIncomingCallPayload(payload: IncomingCallPayload) {
@@ -952,6 +1028,14 @@ export default function App() {
       if (activeInboxMessage && selectedMember) {
         await refreshMessages(activeRoomID, session.userId);
       }
+      await Promise.all(
+        inboxMessages
+          .filter(message => message.roomId !== activeRoomID && message.senderId !== session.userId && isDirectRoomID(message.roomId))
+          .map(async message => {
+            const nextMessage = await decryptMessage(message, session.messageKeySecret);
+            await notifyPrivateMessage(nextMessage);
+          })
+      );
     } catch {
       // Direct inbox refresh prevents missed first-message notifications but is non-fatal.
     }
@@ -1180,7 +1264,9 @@ export default function App() {
   }
 
   async function notifyPrivateMessage(message: Message) {
-    if (!privateMessageSoundEnabled) return;
+    if (!privateMessageSoundEnabledRef.current) return;
+    if (notifiedPrivateMessageIDsRef.current.has(message.id)) return;
+    notifiedPrivateMessageIDsRef.current.add(message.id);
     await ensurePrivateMessageNotifications();
     await Notifications.scheduleNotificationAsync({
       content: {
@@ -1200,6 +1286,7 @@ export default function App() {
     }
 
     if (Platform.OS === "android") {
+      await Notifications.deleteNotificationChannelAsync(PRIVATE_MESSAGE_CHANNEL_ID).catch(() => undefined);
       await Notifications.setNotificationChannelAsync(PRIVATE_MESSAGE_CHANNEL_ID, {
         name: "Private messages",
         importance: Notifications.AndroidImportance.HIGH,
@@ -1293,21 +1380,46 @@ export default function App() {
     });
   }
 
+  async function decryptAttachmentToCache(message: Message) {
+    if (!session || !message.attachment) return;
+    const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(message.roomId)}/attachments/${encodeURIComponent(message.attachment.attachmentId)}?userId=${encodeURIComponent(session.userId)}`);
+    const encryptedData = String(payload.attachment?.data ?? "");
+    const key = await deriveRoomMessageKey(message.roomId, session.messageKeySecret);
+    const opened = nacl.secretbox.open(naclUtil.decodeBase64(encryptedData), naclUtil.decodeBase64(message.attachment.nonce), key);
+    if (!opened) {
+      throw new Error("attachment decrypt failed");
+    }
+
+    const safeName = sanitizeFileName(message.attachment.fileName);
+    const targetURI = `${FileSystem.cacheDirectory ?? ""}${message.id}-${safeName}`;
+    await FileSystem.writeAsStringAsync(targetURI, naclUtil.encodeBase64(opened), { encoding: FileSystem.EncodingType.Base64 });
+    return targetURI;
+  }
+
+  async function loadAttachmentPreview(message: Message) {
+    if (!message.attachment?.mimeType.startsWith("image/")) return;
+    if (attachmentPreviewURIs[message.id] || loadingAttachmentPreviewIDsRef.current.has(message.id)) return;
+
+    loadingAttachmentPreviewIDsRef.current.add(message.id);
+    try {
+      const targetURI = await decryptAttachmentToCache(message);
+      if (targetURI) {
+        setAttachmentPreviewURIs(current => ({ ...current, [message.id]: targetURI }));
+      }
+    } catch {
+      // Image previews are best-effort; tapping the attachment still reports detailed failures.
+    } finally {
+      loadingAttachmentPreviewIDsRef.current.delete(message.id);
+    }
+  }
+
   async function openAttachment(message: Message) {
     if (!session || !message.attachment) return;
     try {
-      const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(message.roomId)}/attachments/${encodeURIComponent(message.attachment.attachmentId)}?userId=${encodeURIComponent(session.userId)}`);
-      const encryptedData = String(payload.attachment?.data ?? "");
-      const key = await deriveRoomMessageKey(message.roomId, session.messageKeySecret);
-      const opened = nacl.secretbox.open(naclUtil.decodeBase64(encryptedData), naclUtil.decodeBase64(message.attachment.nonce), key);
-      if (!opened) {
-        Alert.alert("Attachment locked", "This device could not decrypt the file.");
-        return;
+      const targetURI = attachmentPreviewURIs[message.id] ?? await decryptAttachmentToCache(message);
+      if (!targetURI) {
+        throw new Error("attachment unavailable");
       }
-
-      const safeName = sanitizeFileName(message.attachment.fileName);
-      const targetURI = `${FileSystem.cacheDirectory ?? ""}${Date.now()}-${safeName}`;
-      await FileSystem.writeAsStringAsync(targetURI, naclUtil.encodeBase64(opened), { encoding: FileSystem.EncodingType.Base64 });
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(targetURI, { mimeType: message.attachment.mimeType, dialogTitle: message.attachment.fileName });
       } else {
@@ -1878,13 +1990,34 @@ export default function App() {
           <View style={styles.headerActions}>
             <Pressable
               accessibilityRole="button"
-              accessibilityLabel="Log out"
+              accessibilityLabel="Show lobby members and contacts"
+              accessibilityState={{ expanded: contactsOpen }}
               hitSlop={12}
               android_ripple={{ color: "#6d28d9", borderless: false }}
-              style={styles.secondaryIconButton}
-              onPress={() => void logout()}
+              style={[styles.secondaryIconButton, contactsOpen && styles.headerButtonActive]}
+              onPress={() => {
+                setContactsOpen(current => !current);
+                setOptionsOpen(false);
+              }}
             >
-              <LogOut color="#f8fafc" size={19} />
+              <Users color="#f8fafc" size={19} />
+              {members.length > 0 && (
+                <Text style={styles.headerBadge}>{Math.min(members.length, 99)}</Text>
+              )}
+            </Pressable>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Open options"
+              accessibilityState={{ expanded: optionsOpen }}
+              hitSlop={12}
+              android_ripple={{ color: "#6d28d9", borderless: false }}
+              style={[styles.secondaryIconButton, optionsOpen && styles.headerButtonActive]}
+              onPress={() => {
+                setOptionsOpen(current => !current);
+                setContactsOpen(false);
+              }}
+            >
+              <Settings color="#f8fafc" size={19} />
             </Pressable>
             <Pressable
               accessibilityRole="button"
@@ -1909,39 +2042,137 @@ export default function App() {
           </View>
         </View>
 
-        {Platform.OS === "ios" && (
-          <View style={styles.permissionStrip}>
-            <PermissionToggle
-              icon={Bell}
-              label="Call alerts"
-              state={iosCallAlertPermission}
-              onPress={() => void requestIPhoneCallAlertPermission()}
-            />
-            <PermissionToggle
-              icon={Mic}
-              label="Mic"
-              state={iosMicPermission}
-              onPress={() => void requestIPhoneMicPermission()}
-            />
-            <PermissionToggle
-              icon={Camera}
-              label="Camera"
-              state={iosCameraPermission}
-              onPress={() => void requestIPhoneCameraPermission()}
-            />
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel="Enable iPhone call permissions"
-              hitSlop={10}
-              style={styles.permissionSettingsButton}
-              onPress={() => void requestIPhoneCallPermissions()}
-            >
-              <Settings color="#f8fafc" size={17} />
-            </Pressable>
+        <Modal transparent visible={optionsOpen} animationType="fade" onRequestClose={() => setOptionsOpen(false)}>
+          <View style={styles.menuOverlay}>
+            <Pressable accessibilityLabel="Close options" style={StyleSheet.absoluteFill} onPress={() => setOptionsOpen(false)} />
+            <View style={styles.optionsMenuSheet}>
+              <View style={styles.menuHeader}>
+                <Settings color="#f8fafc" size={18} />
+                <Text style={styles.menuTitle}>Options</Text>
+              </View>
+              <MessageSoundToggle enabled={privateMessageSoundEnabled} onPress={() => void togglePrivateMessageSound()} />
+              {Platform.OS === "ios" ? (
+                <>
+                  <View style={styles.optionsSectionHeader}>
+                    <Text style={styles.optionsSectionTitle}>iPhone call permissions</Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel="Enable iPhone call permissions"
+                      hitSlop={10}
+                      style={styles.permissionSettingsButton}
+                      onPress={() => void requestIPhoneCallPermissions()}
+                    >
+                      <Settings color="#f8fafc" size={17} />
+                    </Pressable>
+                  </View>
+                  <View style={styles.permissionStrip}>
+                    <PermissionToggle
+                      icon={Bell}
+                      label="Call alerts"
+                      state={iosCallAlertPermission}
+                      onPress={() => void requestIPhoneCallAlertPermission()}
+                    />
+                    <PermissionToggle
+                      icon={Mic}
+                      label="Mic"
+                      state={iosMicPermission}
+                      onPress={() => void requestIPhoneMicPermission()}
+                    />
+                    <PermissionToggle
+                      icon={Camera}
+                      label="Camera"
+                      state={iosCameraPermission}
+                      onPress={() => void requestIPhoneCameraPermission()}
+                    />
+                  </View>
+                </>
+              ) : (
+                <>
+                  <Text style={styles.optionsSectionTitle}>Android call permissions</Text>
+                  <View style={styles.permissionStrip}>
+                    <OptionActionButton icon={Mic} label="Mic" onPress={() => void requestCallPermissions("voice")} />
+                    <OptionActionButton icon={Camera} label="Camera" onPress={() => void requestCallPermissions("video")} />
+                  </View>
+                </>
+              )}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Log out"
+                hitSlop={10}
+                style={styles.optionLogoutButton}
+                onPress={() => void logout()}
+              >
+                <LogOut color="#f8fafc" size={18} />
+                <Text style={styles.optionLogoutText}>Log out</Text>
+              </Pressable>
+            </View>
           </View>
-        )}
+        </Modal>
 
-        <MessageSoundToggle enabled={privateMessageSoundEnabled} onPress={() => void togglePrivateMessageSound()} />
+        <Modal transparent visible={contactsOpen} animationType="fade" onRequestClose={() => setContactsOpen(false)}>
+          <View style={styles.menuOverlay}>
+            <Pressable accessibilityLabel="Close contacts" style={StyleSheet.absoluteFill} onPress={() => setContactsOpen(false)} />
+            <View style={styles.contactsMenuSheet}>
+              <View style={styles.lobbyHeader}>
+                <Users color="#596575" size={17} />
+                <Text style={styles.lobbyTitle}>Lobby members and contacts</Text>
+                <Text style={styles.lobbyCount}>{members.length}</Text>
+              </View>
+              <FlatList
+                horizontal
+                data={members}
+                keyExtractor={item => item.id}
+                showsHorizontalScrollIndicator={false}
+                contentContainerStyle={styles.memberList}
+                renderItem={({ item }) => {
+                  const mine = item.id === session.userId;
+                  const roomID = mine ? ROOM_ID : directRoomID(session.userId, item.id);
+                  const unread = unreadRoomIDs.includes(roomID);
+                  return (
+                    <Pressable
+                      style={[
+                        styles.memberChip,
+                        mine && styles.memberChipMine,
+                        selectedMember?.id === item.id && styles.memberChipSelected
+                      ]}
+                      disabled={mine}
+                      onPress={() => {
+                        setSelectedMember(item);
+                        setContactsOpen(false);
+                      }}
+                    >
+                      <View style={styles.memberAvatar}>
+                        <UserAvatar displayName={item.displayName} avatarURL={item.avatarURL} size={34} textStyle={styles.memberAvatarText} />
+                      </View>
+                      <View>
+                        <Text style={styles.memberName} numberOfLines={1}>{item.displayName}</Text>
+                        <Text style={styles.memberMeta}>{mine ? "You" : unread ? "New message" : selectedMember?.id === item.id ? "Private chat" : "Tap to chat"}</Text>
+                      </View>
+                      {unread && <View style={styles.unreadDot} />}
+                    </Pressable>
+                  );
+                }}
+              />
+              {selectedMember && (
+                <View style={styles.privateChatActions}>
+                  <Pressable style={styles.homeRoomButton} onPress={() => setSelectedMember(null)}>
+                    <Text style={styles.homeRoomText}>Back to Home room</Text>
+                  </Pressable>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Delete private chat with ${selectedMember.displayName}`}
+                    hitSlop={12}
+                    style={styles.deleteChatButton}
+                    onPress={() => void deleteDirectChat()}
+                  >
+                    <Trash2 color="#7c2d12" size={18} />
+                    <Text style={styles.deleteChatText}>Delete chat</Text>
+                  </Pressable>
+                </View>
+              )}
+            </View>
+          </View>
+        </Modal>
 
         {incomingCall && (
           <View style={styles.incomingCallOverlay}>
@@ -1964,69 +2195,13 @@ export default function App() {
           </View>
         )}
 
-        <View style={styles.lobby}>
-          <View style={styles.lobbyHeader}>
-            <Users color="#596575" size={17} />
-            <Text style={styles.lobbyTitle}>Lobby</Text>
-            <Text style={styles.lobbyCount}>{members.length}</Text>
-          </View>
-          <FlatList
-            horizontal
-            data={members}
-            keyExtractor={item => item.id}
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.memberList}
-            renderItem={({ item }) => {
-              const mine = item.id === session.userId;
-              const roomID = mine ? ROOM_ID : directRoomID(session.userId, item.id);
-              const unread = unreadRoomIDs.includes(roomID);
-              return (
-                <Pressable
-                  style={[
-                    styles.memberChip,
-                    mine && styles.memberChipMine,
-                    selectedMember?.id === item.id && styles.memberChipSelected
-                  ]}
-                  disabled={mine}
-                  onPress={() => setSelectedMember(item)}
-                >
-                  <View style={styles.memberAvatar}>
-                    <UserAvatar displayName={item.displayName} avatarURL={item.avatarURL} size={34} textStyle={styles.memberAvatarText} />
-                  </View>
-                  <View>
-                    <Text style={styles.memberName} numberOfLines={1}>{item.displayName}</Text>
-                    <Text style={styles.memberMeta}>{mine ? "You" : unread ? "New message" : selectedMember?.id === item.id ? "Private chat" : "Tap to chat"}</Text>
-                  </View>
-                  {unread && <View style={styles.unreadDot} />}
-                </Pressable>
-              );
-            }}
-          />
-          {selectedMember && (
-            <View style={styles.privateChatActions}>
-              <Pressable style={styles.homeRoomButton} onPress={() => setSelectedMember(null)}>
-                <Text style={styles.homeRoomText}>Back to Home room</Text>
-              </Pressable>
-              <Pressable
-                accessibilityRole="button"
-                accessibilityLabel={`Delete private chat with ${selectedMember.displayName}`}
-                hitSlop={12}
-                style={styles.deleteChatButton}
-                onPress={() => void deleteDirectChat()}
-              >
-                <Trash2 color="#7c2d12" size={18} />
-                <Text style={styles.deleteChatText}>Delete chat</Text>
-              </Pressable>
-            </View>
-          )}
-        </View>
-
         <FlatList
           data={messages}
           keyExtractor={item => item.id}
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => {
             const mine = item.senderId === session.userId;
+            const attachmentPreviewURI = attachmentPreviewURIs[item.id];
             const AttachmentIcon = item.attachment?.mimeType.startsWith("image/") ? ImageIcon : FileText;
             return (
               <View style={[styles.messageGroup, mine ? styles.groupMine : styles.groupTheirs]}>
@@ -2039,9 +2214,13 @@ export default function App() {
                       style={styles.attachmentCard}
                       onPress={() => void openAttachment(item)}
                     >
-                      <View style={styles.attachmentIcon}>
-                        <AttachmentIcon color="#4c1d95" size={22} />
-                      </View>
+                      {attachmentPreviewURI ? (
+                        <Image source={{ uri: attachmentPreviewURI }} style={styles.attachmentImagePreview} resizeMode="cover" />
+                      ) : (
+                        <View style={styles.attachmentIcon}>
+                          <AttachmentIcon color="#4c1d95" size={22} />
+                        </View>
+                      )}
                       <View style={styles.attachmentTextBlock}>
                         <Text style={styles.attachmentName} numberOfLines={1}>{item.attachment.fileName}</Text>
                         <Text style={styles.attachmentMeta}>{formatFileSize(item.attachment.sizeBytes)} encrypted</Text>
@@ -2068,28 +2247,44 @@ export default function App() {
               <Text style={styles.emoji}>{emoji}</Text>
             </Pressable>
           ))}
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Show cat meme presets"
+            accessibilityState={{ expanded: catMemesOpen }}
+            disabled={!connected}
+            hitSlop={8}
+            style={[styles.emojiButton, styles.catMemeIconButton, !connected && styles.disabledButton, catMemesOpen && styles.catMemeIconButtonOpen]}
+            onPress={() => setCatMemesOpen(current => !current)}
+          >
+            <Text style={styles.emoji}>🐱</Text>
+          </Pressable>
         </View>
 
-        <FlatList
-          horizontal
-          data={CAT_MEMES}
-          keyExtractor={item => item.label}
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.catMemeList}
-          style={styles.catMemeRow}
-          renderItem={({ item }) => (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Send cat meme ${item.label}`}
-              disabled={!connected}
-              style={[styles.catMemeButton, !connected && styles.disabledButton]}
-              onPress={() => sendMessage(item.text)}
-            >
-              <Text style={styles.catMemeIcon}>🐱</Text>
-              <Text style={styles.catMemeLabel}>{item.label}</Text>
-            </Pressable>
-          )}
-        />
+        {catMemesOpen && (
+          <FlatList
+            horizontal
+            data={CAT_MEMES}
+            keyExtractor={item => item.label}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.catMemeList}
+            style={styles.catMemeRow}
+            renderItem={({ item }) => (
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Send cat meme ${item.label}`}
+                disabled={!connected}
+                style={[styles.catMemeButton, !connected && styles.disabledButton]}
+                onPress={() => {
+                  sendMessage(item.text);
+                  setCatMemesOpen(false);
+                }}
+              >
+                <Text style={styles.catMemeIcon}>🐱</Text>
+                <Text style={styles.catMemeLabel}>{item.label}</Text>
+              </Pressable>
+            )}
+          />
+        )}
 
         <View style={styles.composer}>
           <Pressable
@@ -2152,6 +2347,26 @@ function PermissionToggle({ icon: Icon, label, state, onPress }: { icon: Compone
       </Text>
       <Text style={[styles.permissionStateText, enabled && styles.permissionStateTextOn]} numberOfLines={1}>
         {enabled ? "On" : "Enable"}
+      </Text>
+    </Pressable>
+  );
+}
+
+function OptionActionButton({ icon: Icon, label, onPress }: { icon: ComponentType<{ color?: string; size?: number }>; label: string; onPress: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={`${label} permission`}
+      hitSlop={8}
+      style={styles.permissionToggle}
+      onPress={onPress}
+    >
+      <Icon color="#f8fafc" size={15} />
+      <Text style={styles.permissionToggleText} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text style={styles.permissionStateText} numberOfLines={1}>
+        Enable
       </Text>
     </Pressable>
   );
@@ -2564,6 +2779,8 @@ async function registerDeviceForPush(nextSession: Session, apiURL: string) {
   await registerVoIPDeviceForPush(nextSession, apiURL).catch(() => undefined);
 
   try {
+    await requestIncomingCallNotificationPermission();
+
     const devicePushToken = await Notifications.getDevicePushTokenAsync();
     const pushToken = serializePushTokenData(devicePushToken.data);
     if (!pushToken) return;
@@ -2580,8 +2797,6 @@ async function registerDeviceForPush(nextSession: Session, apiURL: string) {
         appVersion: "0.1.0"
       })
     });
-
-    await requestIncomingCallNotificationPermission();
   } catch {
     // Push registration is retried after login restore and token rotation.
   }
@@ -3022,20 +3237,20 @@ const styles = StyleSheet.create({
   },
   headerActions: {
     flexDirection: "row",
-    gap: 8,
-    marginLeft: 10
+    gap: 6,
+    marginLeft: 8
   },
   iconButton: {
-    width: 42,
-    height: 42,
+    width: 40,
+    height: 40,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#3c245f"
   },
   secondaryIconButton: {
-    width: 42,
-    height: 42,
+    width: 40,
+    height: 40,
     borderRadius: 12,
     alignItems: "center",
     justifyContent: "center",
@@ -3043,15 +3258,91 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#6d46a3"
   },
+  headerButtonActive: {
+    backgroundColor: "#6d28d9",
+    borderColor: "#8b5cf6"
+  },
+  headerBadge: {
+    position: "absolute",
+    right: -4,
+    top: -5,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    overflow: "hidden",
+    paddingHorizontal: 4,
+    textAlign: "center",
+    textAlignVertical: "center",
+    color: "#24123d",
+    backgroundColor: "#f8fafc",
+    fontSize: 10,
+    fontWeight: "900"
+  },
+  menuOverlay: {
+    flex: 1,
+    paddingHorizontal: 12,
+    paddingTop: TOP_SAFE_AREA_HEIGHT + 76,
+    backgroundColor: "rgba(15, 23, 32, 0.38)"
+  },
+  optionsMenuSheet: {
+    gap: 10,
+    alignSelf: "flex-end",
+    width: "100%",
+    maxWidth: 390,
+    borderRadius: 16,
+    padding: 12,
+    backgroundColor: "#140a24",
+    borderWidth: 1,
+    borderColor: "#2f1b4b",
+    shadowColor: "#000000",
+    shadowOpacity: 0.24,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12
+  },
+  contactsMenuSheet: {
+    alignSelf: "flex-end",
+    width: "100%",
+    maxWidth: 430,
+    borderRadius: 16,
+    paddingVertical: 12,
+    backgroundColor: "#f7f3ff",
+    borderWidth: 1,
+    borderColor: "#ded4ff",
+    shadowColor: "#000000",
+    shadowOpacity: 0.18,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 12
+  },
+  menuHeader: {
+    minHeight: 36,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8
+  },
+  menuTitle: {
+    color: "#f8fafc",
+    fontSize: 16,
+    fontWeight: "900"
+  },
+  optionsSectionHeader: {
+    minHeight: 38,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 10
+  },
+  optionsSectionTitle: {
+    color: "#f8fafc",
+    fontSize: 13,
+    fontWeight: "900"
+  },
   permissionStrip: {
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: "#140a24",
-    borderBottomWidth: 1,
-    borderBottomColor: "#2f1b4b"
+    backgroundColor: "#140a24"
   },
   permissionToggle: {
     flex: 1,
@@ -3102,14 +3393,13 @@ const styles = StyleSheet.create({
     borderColor: "#6d46a3"
   },
   messageSoundToggle: {
-    minHeight: 42,
+    minHeight: 44,
+    borderRadius: 12,
     flexDirection: "row",
     alignItems: "center",
     gap: 8,
-    paddingHorizontal: 14,
-    backgroundColor: "#ebe7ff",
-    borderBottomWidth: 1,
-    borderBottomColor: "#d8ccff"
+    paddingHorizontal: 12,
+    backgroundColor: "#ebe7ff"
   },
   messageSoundToggleText: {
     flex: 1,
@@ -3138,6 +3428,23 @@ const styles = StyleSheet.create({
   },
   messageSoundKnobOn: {
     transform: [{ translateX: 20 }]
+  },
+  optionLogoutButton: {
+    minHeight: 42,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: "#3c245f",
+    borderWidth: 1,
+    borderColor: "#6d46a3"
+  },
+  optionLogoutText: {
+    color: "#f8fafc",
+    fontSize: 13,
+    fontWeight: "900"
   },
   incomingCallOverlay: {
     position: "absolute",
@@ -3487,6 +3794,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: 10
   },
+  attachmentImagePreview: {
+    width: 92,
+    height: 92,
+    borderRadius: 10,
+    backgroundColor: "#f3e8ff"
+  },
   attachmentIcon: {
     width: 42,
     height: 42,
@@ -3541,6 +3854,14 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#ffffff"
+  },
+  catMemeIconButton: {
+    borderWidth: 1,
+    borderColor: "#ddd1ff"
+  },
+  catMemeIconButtonOpen: {
+    backgroundColor: "#ede6ff",
+    borderColor: "#7c3aed"
   },
   emoji: {
     fontSize: 22

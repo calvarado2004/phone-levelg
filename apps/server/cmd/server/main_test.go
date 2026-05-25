@@ -275,6 +275,28 @@ func TestCallPushPayloadShapesAPNSAndFCM(t *testing.T) {
 	if _, ok := message["notification"]; ok {
 		t.Fatalf("android call pushes must be data-only so the native FirebaseMessagingService handles background calls: %#v", fcmPayload)
 	}
+
+	messagePayload := messagePushPayload{
+		MessageID: "message-1",
+		RoomID:    "dm:alice:bob",
+		SenderID:  "alice",
+		Sender:    "Alice",
+		Preview:   "New private message",
+	}
+	apnsMessage := apnsMessagePayload(messagePayload)
+	if apnsMessage["type"] != "message:new" || apnsMessage["messageId"] != "message-1" {
+		t.Fatalf("unexpected apns message payload: %#v", apnsMessage)
+	}
+	fcmMessage := fcmMessagePayload(messagePayload, "fcm-token")
+	fcmEnvelope := fcmMessage["message"].(map[string]any)
+	fcmNotification := fcmEnvelope["notification"].(map[string]string)
+	if fcmEnvelope["token"] != "fcm-token" || fcmNotification["title"] != "Alice" {
+		t.Fatalf("unexpected fcm message payload: %#v", fcmMessage)
+	}
+	fcmAndroidNotification := fcmEnvelope["android"].(map[string]any)["notification"].(map[string]any)
+	if fcmAndroidNotification["channel_id"] != "private-messages" || fcmAndroidNotification["sound"] != "message_notification" {
+		t.Fatalf("expected private-message android channel and sound: %#v", fcmMessage)
+	}
 }
 
 func TestRetryEventuallySucceeds(t *testing.T) {
@@ -926,11 +948,13 @@ func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	defer rdb.Close()
+	pushRecorder := &recordingPushDispatcher{}
 
 	app := &server{
 		cfg:   config{sharedInviteCode: "home"},
 		db:    db,
 		redis: rdb,
+		push:  pushRecorder,
 	}
 	for _, item := range []member{
 		{ID: "alice", DisplayName: "Alice"},
@@ -940,6 +964,20 @@ func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
 		_, err := db.Exec(ctx, `insert into users (id, display_name) values ($1, $2)`, item.ID, item.DisplayName)
 		if err != nil {
 			t.Fatalf("insert user %s: %v", item.ID, err)
+		}
+	}
+	for _, item := range []pushDevice{
+		{DeviceID: "alice-phone", UserID: "alice", Platform: "ios", PushToken: "alice-token", PushTokenType: "apns"},
+		{DeviceID: "bob-android", UserID: "bob", Platform: "android", PushToken: "bob-fcm-token", PushTokenType: "fcm"},
+		{DeviceID: "bob-iphone", UserID: "bob", Platform: "ios", PushToken: "bob-apns-token", PushTokenType: "apns"},
+		{DeviceID: "bob-voip", UserID: "bob", Platform: "ios", PushToken: "bob-voip-token", PushTokenType: "apns-voip"},
+		{DeviceID: "charlie-phone", UserID: "charlie", Platform: "ios", PushToken: "charlie-token", PushTokenType: "apns"},
+	} {
+		_, err := db.Exec(ctx, `
+insert into devices (device_id, user_id, platform, push_token, push_token_type)
+values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.PushToken, item.PushTokenType)
+		if err != nil {
+			t.Fatalf("insert device %s: %v", item.DeviceID, err)
 		}
 	}
 
@@ -953,6 +991,26 @@ func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
 	app.createMessage(rec, req)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected created, got %d: %s", rec.Code, rec.Body.String())
+	}
+	pushMessage := pushRecorder.waitForMessage(t, 1)[0]
+	if pushMessage.payload.MessageID == "" || pushMessage.payload.RoomID != roomID || pushMessage.payload.SenderID != "alice" || pushMessage.payload.Sender != "Alice" {
+		t.Fatalf("unexpected message push payload: %#v", pushMessage.payload)
+	}
+	if pushMessage.payload.Preview != "New private message" {
+		t.Fatalf("unexpected message push preview: %q", pushMessage.payload.Preview)
+	}
+	pushedTokens := map[string]bool{}
+	for _, device := range pushMessage.devices {
+		if device.UserID != "bob" {
+			t.Fatalf("expected only bob account devices, got %#v", pushMessage.devices)
+		}
+		if device.PushTokenType == "apns-voip" {
+			t.Fatalf("message push must not use voip token: %#v", pushMessage.devices)
+		}
+		pushedTokens[device.PushToken] = true
+	}
+	if len(pushMessage.devices) != 2 || !pushedTokens["bob-fcm-token"] || !pushedTokens["bob-apns-token"] {
+		t.Fatalf("expected bob APNs alert and FCM message tokens, got %#v", pushMessage.devices)
 	}
 
 	inboxReq := httptest.NewRequest(http.MethodGet, "/direct/inbox?userId=bob", nil)
@@ -1434,8 +1492,9 @@ type recordedPushCall struct {
 }
 
 type recordingPushDispatcher struct {
-	mu    sync.Mutex
-	calls []recordedPushCall
+	mu       sync.Mutex
+	calls    []recordedPushCall
+	messages []recordedPushMessage
 }
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
@@ -1450,6 +1509,20 @@ func (r *recordingPushDispatcher) DispatchCallPush(_ context.Context, payload ca
 
 	copiedDevices := append([]pushDevice(nil), devices...)
 	r.calls = append(r.calls, recordedPushCall{payload: payload, devices: copiedDevices})
+	return nil
+}
+
+type recordedPushMessage struct {
+	payload messagePushPayload
+	devices []pushDevice
+}
+
+func (r *recordingPushDispatcher) DispatchMessagePush(_ context.Context, payload messagePushPayload, devices []pushDevice) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	copiedDevices := append([]pushDevice(nil), devices...)
+	r.messages = append(r.messages, recordedPushMessage{payload: payload, devices: copiedDevices})
 	return nil
 }
 
@@ -1471,6 +1544,27 @@ func (r *recordingPushDispatcher) waitForCall(t *testing.T, count int) []recorde
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	t.Fatalf("expected %d push calls, got %d", count, len(r.calls))
+	return nil
+}
+
+func (r *recordingPushDispatcher) waitForMessage(t *testing.T, count int) []recordedPushMessage {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		if len(r.messages) >= count {
+			messages := append([]recordedPushMessage(nil), r.messages...)
+			r.mu.Unlock()
+			return messages
+		}
+		r.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t.Fatalf("expected %d message pushes, got %d", count, len(r.messages))
 	return nil
 }
 

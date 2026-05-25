@@ -73,6 +73,7 @@ assert.match(appTsx, /AsyncStorage\.setItem\(STORED_SESSION_KEY/, "Successful lo
 assert.match(appTsx, /AsyncStorage\.removeItem\(STORED_SESSION_KEY/, "Logout must clear the stored 30-day session");
 assert.match(appTsx, /STORED_DEVICE_ID_KEY = "phone-levelg\.device\.v1"/, "Mobile app must persist a stable per-install device id for push registration");
 assert.match(appTsx, /Notifications\.getDevicePushTokenAsync\(\)/, "Mobile app must register native APNs or FCM device tokens");
+assert.match(appTsx, /await requestIncomingCallNotificationPermission\(\);\s*const devicePushToken = await Notifications\.getDevicePushTokenAsync\(\)/, "Mobile app must request notification permission before regular APNs/FCM token registration");
 assert.match(appTsx, /Notifications\.addPushTokenListener/, "Mobile app must refresh backend device registration when the native push token rotates");
 assert.match(appTsx, /\/devices\/register/, "Mobile app must send device tokens to the private backend registry");
 assert.match(appTsx, /pushTokenTypeForPlatform\(devicePushToken\.type\)/, "Mobile app must identify APNs versus FCM tokens for backend dispatch");
@@ -90,6 +91,8 @@ assert.match(appTsx, /Linking\.addEventListener\("url"/, "Android native call ac
 assert.match(appTsx, /parseNativeCallURL/, "Mobile app must parse native call deep links into normal call payloads");
 assert.match(appTsx, /acceptNativeIncomingCallPayload/, "Mobile app must accept Android native call actions through the LiveKit join path");
 assert.match(appTsx, /declineNativeIncomingCallPayload/, "Mobile app must reject Android native declined calls through the normal signaling path");
+assert.match(appTsx, /queueNativeAnswerCall\(callUUID\)/, "CallKit answer events must be queued so session restore can finish before LiveKit joins");
+assert.match(appTsx, /RNCallKeepPerformAnswerCallAction/, "Delayed CallKit answer events must be replayed after the JS bridge loads");
 assert.match(appTsx, /pendingNativeDeclineRef/, "Android native declined calls must wait for websocket restoration before sending rejection");
 assert.match(appTsx, /params\.action !== "accept" && params\.action !== "decline"/, "Mobile app must parse both Android native accept and decline actions");
 assert.match(appTsx, /normalizeIncomingCallPayload/, "Mobile app must normalize websocket and native-push call payloads through one path");
@@ -120,8 +123,8 @@ assert.match(appTsx, /Notifications\.scheduleNotificationAsync/, "Incoming calls
 assert.match(appTsx, /const CAT_MEMES = \[/, "Chat must include cat meme quick-send presets");
 assert.match(appTsx, /cat loaf has joined the chat/, "Cat meme presets must send real chat text");
 assert.match(appTsx, /accessibilityLabel=\{`Send cat meme \$\{item\.label\}`\}/, "Cat meme quick-send buttons must be accessible");
-assert.match(appTsx, /onPress=\{\(\) => sendMessage\(item\.text\)\}/, "Cat meme quick-send buttons must use the normal message persistence path");
-assert.match(appTsx, /catMemeRow: \{[\s\S]*height: 56/, "Cat meme presets must stay as a compact row");
+assert.match(appTsx, /sendMessage\(item\.text\);[\s\S]*setCatMemesOpen\(false\)/, "Cat meme quick-send buttons must use the normal message persistence path and close the expandable box");
+assert.match(appTsx, /catMemeRow: \{[\s\S]*height: 56/, "Cat meme presets must stay as a compact expandable row");
 assert.match(appTsx, /directRoomID/, "Mobile app must support deterministic 1-1 direct message rooms");
 assert.match(appTsx, /`dm:\$\{\[firstID, secondID\]\.sort\(\)\.join\(":\"\)\}`/, "1-1 rooms must use explicit private room IDs");
 assert.match(appTsx, /rooms\/\$\{encodeURIComponent\(roomID\)\}\/messages\?userId=\$\{encodeURIComponent\(userID\)\}/, "Private message history requests must include the current user id");
@@ -149,6 +152,9 @@ assert.doesNotMatch(appTsx, /encryptMessageText\(activeRoomID, text, inviteCode\
 assert.doesNotMatch(appTsx, /decryptMessage\([^)]*, inviteCode\)/, "Message decryption must not use mutable invite-code UI state");
 assert.doesNotMatch(appTsx, /deriveRoomMessageKey\([^)]*, inviteCode\)/, "Attachment encryption/decryption must not use mutable invite-code UI state");
 assert.match(appTsx, /readPickedAttachmentBytes\(picked\)/, "Mobile attachments must load picker bytes through the shared readable attachment path before encryption");
+assert.match(appTsx, /attachmentPreviewURIs/, "Image attachments must maintain decrypted local preview URIs for inline chat rendering");
+assert.match(appTsx, /loadAttachmentPreview\(message\)/, "Image attachments must be decrypted into previews when chat messages render");
+assert.match(appTsx, /style=\{styles\.attachmentImagePreview\}/, "Image attachments must render an inline chat preview instead of only an icon and filename");
 assert.match(appTsx, /DocumentPicker\.getDocumentAsync\(\{[\s\S]*base64: true/, "Document attachments must request picker-provided base64 so Android and iOS document-provider URIs are readable");
 assert.match(appTsx, /ImagePicker\.launchImageLibraryAsync\(\{[\s\S]*base64: true/, "Photo attachments must request picker-provided base64 so iOS photo-library assets are readable");
 assert.match(appTsx, /picked\.base64[\s\S]*naclUtil\.decodeBase64\(picked\.base64\)/, "Mobile attachments must prefer picker-provided base64 bytes when available");
