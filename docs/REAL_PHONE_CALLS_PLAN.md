@@ -87,9 +87,11 @@ sequenceDiagram
 - [x] Add first-pass FCM registration through Expo native device push tokens.
 - [x] Send FCM token to `/devices/register`.
 - [ ] Handle high-priority data message in background/killed states.
-- [ ] Show full-screen incoming-call notification.
-- [ ] Wire Accept and Decline notification actions.
-- [ ] Reuse `rockstar.mp3` ringtone and vibration pattern.
+- [x] Add native full-screen incoming-call activity and notification builder.
+- [x] Show full-screen incoming-call notification from native call metadata.
+- [x] Wire native Accept and Decline notification actions.
+- [x] Reuse `rockstar.mp3` ringtone and vibration pattern.
+- [ ] Attach Firebase Messaging service to invoke native full-screen call notification from real FCM data pushes.
 - [ ] Validate on a locked Android device or emulator with Play Services.
 - [ ] Evaluate Telecom/ConnectionService as a follow-up for deeper phone integration.
 
@@ -116,6 +118,7 @@ sequenceDiagram
 - [x] Add backend tests for APNs/FCM call payload shaping.
 - [x] Add native project validation for mobile call-id dedupe, pending call persistence, and expired push handling.
 - [x] Add native project validation for caller-side unanswered-call timeout.
+- [x] Add native project validation for Android full-screen call activity, notification, ringtone, and action wiring.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
