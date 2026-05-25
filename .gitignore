@@ -14,3 +14,4 @@ apps/mobile/ios/DerivedData*/
 apps/mobile/.env.local
 apps/mobile/android/app/google-services.json
 GoogleService-Info.plist
+deploy/openshift/*.local.yaml

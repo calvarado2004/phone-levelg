@@ -491,11 +491,11 @@ They create:
 - namespace `phone-levelg`
 - backend `ImageStream`
 - backend Git-sourced `BuildConfig`
-- backend GitHub webhook secret placeholder
+- backend references to externally managed Secrets
 - backend `Deployment`, `Service`, and `Route`
-- Postgres `StatefulSet`, `Service`, Secret, and PVC
+- Postgres `StatefulSet`, `Service`, externally managed Secret reference, and PVC
 - Redis `StatefulSet`, `Service`, and PVC
-- LiveKit `Deployment`, `Service`, and `Route`
+- LiveKit `Deployment`, `Service`, `Route`, and externally managed Secret reference
 
 Deploy stateful services and backend manifests:
 
@@ -512,6 +512,7 @@ Backend build contract:
 - OpenShift clones the GitHub repo in its BuildConfig pod, runs `apps/server/Dockerfile`, and pushes the resulting backend image into the internal registry.
 - Do not upload Android APKs, iOS apps, local build directories, or ad hoc backend binaries to OpenShift.
 - Mobile release binaries are built and installed for devices outside OpenShift. OpenShift only runs backend, Postgres, Redis, and LiveKit objects.
+- Real OpenShift manifests do not define Secrets and do not carry placeholder secret values. Local real Secrets can live in ignored `deploy/openshift/secrets.local.yaml`; tracked examples live in `deploy/openshift/secrets.example.yaml`.
 
 The backend BuildConfig is configured with Git source:
 
@@ -525,7 +526,7 @@ The backend deployment pulls:
 image-registry.openshift-image-registry.svc:5000/phone-levelg/phone-levelg-server:latest
 ```
 
-Configure the GitHub webhook on the BuildConfig after replacing the placeholder `phone-levelg-github-webhook` secret with a private value. GitHub pushes should trigger the backend build; manual local directory uploads are not part of the normal deployment flow.
+Configure the GitHub webhook using the externally managed `phone-levelg-github-webhook` Secret. GitHub pushes should trigger the backend build; manual local directory uploads are not part of the normal deployment flow.
 
 Check rollout:
 

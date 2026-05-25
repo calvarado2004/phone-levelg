@@ -1,13 +1,4 @@
 apiVersion: v1
-kind: Secret
-metadata:
-  name: phone-levelg-livekit
-  namespace: phone-levelg
-type: Opaque
-stringData:
-  LIVEKIT_KEYS: "devkey: secret"
----
-apiVersion: v1
 kind: ConfigMap
 metadata:
   name: phone-levelg-livekit
@@ -17,8 +8,6 @@ data:
     port: 7880
     bind_addresses:
       - ""
-    keys:
-      devkey: secret
     rtc:
       node_ip: 192.168.1.88
       tcp_port: 7881

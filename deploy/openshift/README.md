@@ -10,15 +10,14 @@ Storage class for PVC-backed services: `px-csi-db`
   - namespace
   - local OpenShift ImageStream
   - Git-sourced BuildConfig
-  - GitHub webhook secret placeholder
-  - backend secret
+  - references to externally managed backend and webhook Secrets
   - backend Deployment
   - backend Service
   - backend Route
 
 - `postgres.yaml`
-  - Postgres Secret
   - Postgres StatefulSet
+  - reference to externally managed Postgres Secret
   - Postgres PVC using `px-csi-db`
   - ClusterIP Service
 
@@ -30,6 +29,7 @@ Storage class for PVC-backed services: `px-csi-db`
 - `livekit.yaml`
   - LiveKit ConfigMap
   - LiveKit Deployment
+  - reference to externally managed LiveKit Secret
   - LiveKit LoadBalancer Service
   - TCP signaling/media ports and UDP WebRTC media ports
 
@@ -54,7 +54,9 @@ https://github.com/calvarado2004/phone-levelg.git
 
 The build pod runs `apps/server/Dockerfile` inside OpenShift and pushes the resulting backend image into the internal registry. Commit and push source changes to GitHub first, then let the GitHub webhook trigger the BuildConfig.
 
-Replace the placeholder `phone-levelg-github-webhook` secret value in OpenShift with a private webhook secret and configure the GitHub repository webhook to point at the BuildConfig webhook URL.
+Real OpenShift manifests do not define Secret objects and do not contain placeholder secret values. Keep local real Secret exports in ignored `deploy/openshift/secrets.local.yaml`. Use tracked `deploy/openshift/secrets.example.yaml` only as a shape reference.
+
+Configure the GitHub repository webhook with the externally managed `phone-levelg-github-webhook` Secret and point it at the BuildConfig webhook URL.
 
 ## Internal Registry
 

@@ -35,37 +35,6 @@ spec:
         secretReference:
           name: phone-levelg-github-webhook
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: phone-levelg-github-webhook
-  namespace: phone-levelg
-type: Opaque
-stringData:
-  WebHookSecretKey: "replace-with-private-github-webhook-secret"
----
-apiVersion: v1
-kind: Secret
-metadata:
-  name: phone-levelg-server
-  namespace: phone-levelg
-type: Opaque
-stringData:
-  SHARED_INVITE_CODE: "home"
-  LIVEKIT_API_KEY: "devkey"
-  LIVEKIT_API_SECRET: "secret"
-  DATABASE_URL: "postgres://phone_levelg:phone_levelg@postgres:5432/phone_levelg?sslmode=disable"
-  REDIS_ADDR: "redis:6379"
-  APNS_TEAM_ID: ""
-  APNS_KEY_ID: ""
-  APNS_BUNDLE_ID: "io.levelg.phone"
-  APNS_PRIVATE_KEY: ""
-  APNS_ENDPOINT: "https://api.push.apple.com"
-  FCM_PROJECT_ID: ""
-  FCM_ACCESS_TOKEN: ""
-  FCM_SERVICE_ACCOUNT_JSON: ""
-  FCM_ENDPOINT: ""
----
 apiVersion: apps/v1
 kind: Deployment
 metadata:

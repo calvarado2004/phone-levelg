@@ -8,6 +8,7 @@ const files = [
   "deploy/openshift/redis.yaml",
   "deploy/openshift/livekit.yaml"
 ];
+const exampleFiles = ["deploy/openshift/secrets.example.yaml"];
 
 const resources = files.flatMap(file => {
   const contents = readFileSync(file, "utf8");
@@ -20,6 +21,8 @@ for (const { file, resource } of resources) {
   assert.ok(resource.apiVersion, `${file}: apiVersion is required`);
   assert.ok(resource.kind, `${file}: kind is required`);
   assert.ok(resource.metadata?.name, `${file}: metadata.name is required`);
+  assert.notEqual(resource.kind, "Secret", `${file}: real OpenShift manifests must not define Secret objects`);
+  assert.doesNotMatch(JSON.stringify(resource), /replace-with-|devkey: secret/i, `${file}: real OpenShift manifests must not contain placeholder secret values`);
 }
 
 const namespace = find("Namespace", "phone-levelg");
@@ -44,10 +47,12 @@ for (const { file, resource } of buildManifests) {
 
 const deployment = find("Deployment", "phone-levelg-server");
 assert.equal(deployment.metadata.namespace, "phone-levelg");
+const serverContainer = deployment.spec.template.spec.containers[0];
 assert.equal(
-  deployment.spec.template.spec.containers[0].image,
+  serverContainer.image,
   "image-registry.openshift-image-registry.svc:5000/phone-levelg/phone-levelg-server:latest"
 );
+assert.deepEqual(serverContainer.envFrom, [{ secretRef: { name: "phone-levelg-server" } }]);
 assert.equal(
   deployment.spec.replicas,
   1,
@@ -72,6 +77,7 @@ for (const statefulSetName of ["postgres", "redis"]) {
 const postgres = find("StatefulSet", "postgres");
 const postgresContainer = postgres.spec.template.spec.containers[0];
 assert.equal(postgresContainer.image, "docker.io/library/postgres:18-alpine");
+assert.deepEqual(postgresContainer.envFrom, [{ secretRef: { name: "postgres" } }]);
 assert.equal(postgresContainer.volumeMounts[0].mountPath, "/var/lib/postgresql");
 assert.deepEqual(
   postgresContainer.env.find(env => env.name === "PGDATA"),
@@ -81,15 +87,14 @@ assert.deepEqual(
 const redis = find("StatefulSet", "redis");
 assert.equal(redis.spec.template.spec.containers[0].image, "docker.io/library/redis:7-alpine");
 
-const serverSecret = find("Secret", "phone-levelg-server");
-assert.equal(serverSecret.stringData.DATABASE_URL, "postgres://phone_levelg:phone_levelg@postgres:5432/phone_levelg?sslmode=disable");
-assert.equal(serverSecret.stringData.REDIS_ADDR, "redis:6379");
-assert.equal(serverSecret.stringData.LIVEKIT_API_KEY, "devkey");
-assert.equal(serverSecret.stringData.LIVEKIT_API_SECRET, "secret");
-
 const livekitDeployment = find("Deployment", "phone-levelg-livekit");
 assert.equal(livekitDeployment.metadata.namespace, "phone-levelg");
-assert.equal(livekitDeployment.spec.template.spec.containers[0].image, "docker.io/livekit/livekit-server:latest");
+const livekitContainer = livekitDeployment.spec.template.spec.containers[0];
+assert.equal(livekitContainer.image, "docker.io/livekit/livekit-server:latest");
+assert.deepEqual(
+  livekitContainer.env.find(env => env.name === "LIVEKIT_KEYS")?.valueFrom,
+  { secretKeyRef: { name: "phone-levelg-livekit", key: "LIVEKIT_KEYS" } }
+);
 
 const livekitRoute = find("Route", "phone-levelg-livekit");
 assert.equal(livekitRoute.spec.port.targetPort, "signal");
@@ -101,6 +106,26 @@ assert.ok(
 );
 
 console.log(`Validated ${resources.length} OpenShift resources`);
+
+const exampleResources = exampleFiles.flatMap(file => {
+  const contents = readFileSync(file, "utf8");
+  return parseAllDocuments(contents)
+    .filter(doc => doc.contents)
+    .map(doc => ({ file, resource: doc.toJSON() }));
+});
+
+for (const { file, resource } of exampleResources) {
+  assert.equal(resource.kind, "Secret", `${file}: example manifests must only contain Secret examples`);
+  assert.match(file, /\.example\.yaml$/, `${file}: placeholder values must live only in .example.yaml files`);
+  assert.equal(resource.metadata?.annotations?.["phone-levelg.io/example-only"], "true", `${file}: Secret examples must be marked example-only`);
+}
+
+for (const secretName of ["phone-levelg-github-webhook", "phone-levelg-server", "postgres", "phone-levelg-livekit"]) {
+  assert.ok(
+    exampleResources.some(({ resource }) => resource.metadata?.name === secretName),
+    `missing example Secret/${secretName}`
+  );
+}
 
 function find(kind, name) {
   const match = resources.find(({ resource }) => resource.kind === kind && resource.metadata?.name === name);

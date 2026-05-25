@@ -12,7 +12,7 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 - Message bodies are encrypted on the mobile client before backend persistence. The current phase is server-blind shared room encryption; per-device key exchange is the next hardening phase.
 - 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
 - 1-1 private-message notifications can use the bundled `message-notification.mp3` sound. The lobby intentionally remains silent.
-- OpenShift backend deployment now uses a Git-sourced BuildConfig. Backend images are built by OpenShift build pods from committed GitHub source; mobile binaries and local build directories must not be uploaded to the cluster.
+- OpenShift backend deployment now uses a Git-sourced BuildConfig. Backend images are built by OpenShift build pods from committed GitHub source; mobile binaries, local build directories, and Secret objects must not be uploaded through the tracked runtime manifests.
 
 ## Architecture Target
 
@@ -215,6 +215,7 @@ sequenceDiagram
 - [x] Change OpenShift backend BuildConfig from binary uploads to GitHub source.
 - [x] Document that OpenShift builds backend images from GitHub source and never receives mobile binaries.
 - [x] Add manifest validation that rejects Binary BuildConfigs.
+- [x] Split real OpenShift Secret objects out of runtime manifests into ignored local YAML plus tracked example YAML.
 - [x] Deploy backend to OpenShift.
 - [x] Build iOS Release app.
 - [x] Build Android Release APK.
