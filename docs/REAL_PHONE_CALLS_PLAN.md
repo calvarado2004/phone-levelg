@@ -156,3 +156,20 @@ sequenceDiagram
 - APNs/FCM credentials must never be committed to the repository.
 - Email remains the stable user identity. Display name is presentation only.
 - Push delivery complements WebSocket signaling; it does not replace LiveKit for media.
+
+## Resume After Apple Developer Activation
+
+Apple Developer Program activation can take up to 48 hours. When the paid team is active, continue here:
+
+1. Open Xcode > Settings > Accounts and refresh/download profiles for the paid Apple Developer team.
+2. In Apple Developer > Certificates, Identifiers & Profiles > Identifiers, create or edit explicit App ID `io.levelg.phone`.
+3. Enable Push Notifications on `io.levelg.phone`.
+4. Regenerate an iOS Development provisioning profile for `io.levelg.phone` that includes `aps-environment`.
+5. Rebuild iOS Release with automatic provisioning:
+   `xcodebuild -allowProvisioningUpdates -workspace apps/mobile/ios/PhoneLevelG.xcworkspace -scheme PhoneLevelG -configuration Release -sdk iphoneos -derivedDataPath apps/mobile/ios/DerivedData-device ENABLE_USER_SCRIPT_SANDBOXING=NO build`
+6. Install the built Release app on both connected iPhones:
+   - Carlos's iPhone: `0E794132-0AB9-5FB6-BA0B-F680555A6888`
+   - iPhone: `1EF56DCA-836E-5DEE-9C0E-9514B5EE56CF`
+7. Log in on both iPhones so the app registers the regular APNs token and PushKit VoIP token with the OpenShift backend.
+8. Run locked/background incoming-call tests iPhone-to-iPhone, Android-to-iPhone, and iPhone-to-Android.
+9. Mark the pending iOS deployment and locked-device validation tasks complete only after the calls ring while the callee app is backgrounded or locked.
