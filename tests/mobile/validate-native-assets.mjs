@@ -50,6 +50,10 @@ assert.match(appTsx, /Notifications\.addNotificationResponseReceivedListener/, "
 assert.match(appTsx, /normalizeIncomingCallPayload/, "Mobile app must normalize websocket and native-push call payloads through one path");
 assert.match(appTsx, /isExpiredCall\(payload\.expiresAt\)/, "Mobile app must ignore expired native call pushes");
 assert.match(appTsx, /callMatchesPayload\(incomingCallRef\.current, payload\.data\)/, "Remote call end/reject must match by call id when present");
+assert.match(appTsx, /CALL_RING_TIMEOUT_MS = 45 \* 1000/, "Outgoing calls must have a bounded unanswered-ring timeout");
+assert.match(appTsx, /scheduleOutgoingCallUnavailable\(room\)/, "Outgoing calls must schedule an unavailable state after ringing");
+assert.match(appTsx, /status: "Unavailable"/, "Unanswered outgoing calls must end with an Unavailable status");
+assert.match(appTsx, /clearOutgoingCallTimeout\(\)/, "Outgoing call timeout must be cleared when calls connect or end");
 assert.match(appTsx, /accessibilityLabel="Log out"/, "Mobile app must expose an accessible logout button");
 assert.match(appTsx, /picture\?: string/, "Google profile photos must be read from userinfo");
 assert.match(appTsx, /avatarURL: normalizeAvatarURL\(avatarURL\)/, "Login must send the profile photo URL to the private backend");

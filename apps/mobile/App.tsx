@@ -98,6 +98,7 @@ const STORED_SESSION_KEY = "phone-levelg.session.v2";
 const STORED_DEVICE_ID_KEY = "phone-levelg.device.v1";
 const STORED_PENDING_CALL_KEY = "phone-levelg.pendingCall.v1";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const CALL_RING_TIMEOUT_MS = 45 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
 const ANDROID_STATUS_BAR_HEIGHT = Platform.OS === "android" ? NativeStatusBar.currentHeight ?? 0 : 0;
@@ -248,6 +249,7 @@ export default function App() {
   const nativeCallsRef = useRef<Record<string, IncomingCall>>({});
   const handledCallIDsRef = useRef<Set<string>>(new Set());
   const incomingCallExpirationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const outgoingCallTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callKeepReadyRef = useRef(false);
   const incomingCallNotificationRef = useRef<string | null>(null);
   const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
@@ -876,6 +878,7 @@ export default function App() {
         setRemoteParticipantCount(room.remoteParticipants.size);
         if (announce) {
           sendSocket("call:ring", { roomId: roomID, mode });
+          scheduleOutgoingCallUnavailable(room);
         }
         if (activeCallUUIDRef.current) {
           getNativeCallKeep()?.reportConnectedOutgoingCallWithUUID?.(activeCallUUIDRef.current);
@@ -883,6 +886,7 @@ export default function App() {
         }
       });
       room.on(RoomEvent.ParticipantConnected, () => {
+        clearOutgoingCallTimeout();
         setRemoteParticipantCount(room.remoteParticipants.size);
         setCallStatus("Connected");
         syncVideoTracks(room);
@@ -943,8 +947,25 @@ export default function App() {
     await endCurrentCall({ announce: true, status: "Call ended" });
   }
 
+  function scheduleOutgoingCallUnavailable(room: Room) {
+    clearOutgoingCallTimeout();
+    outgoingCallTimeoutRef.current = setTimeout(() => {
+      if (roomRef.current === room && room.remoteParticipants.size === 0) {
+        void endCurrentCall({ announce: true, status: "Unavailable" });
+      }
+    }, CALL_RING_TIMEOUT_MS);
+  }
+
+  function clearOutgoingCallTimeout() {
+    if (outgoingCallTimeoutRef.current) {
+      clearTimeout(outgoingCallTimeoutRef.current);
+      outgoingCallTimeoutRef.current = null;
+    }
+  }
+
   async function endCurrentCall({ announce, status, native = true }: { announce: boolean; status: string; native?: boolean }) {
     await stopIncomingCallTone();
+    clearOutgoingCallTimeout();
     const roomID = activeCallRoomIDRef.current;
     const callUUID = activeCallUUIDRef.current;
     if (announce && roomID) {

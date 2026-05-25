@@ -102,7 +102,7 @@ sequenceDiagram
 - [x] Deduplicate foreground WebSocket ring and native push ring for the same `callId`.
 - [x] Persist pending incoming call metadata long enough for native action handling.
 - [x] Ensure expired pushes do not show call UI.
-- [ ] Ensure caller sees `Call rejected`, `Call ended`, or `Unavailable`.
+- [x] Ensure caller sees `Call rejected`, `Call ended`, or `Unavailable`.
 - [ ] Keep local and remote video behavior unchanged after push-based entry.
 
 ### Test Coverage
@@ -115,6 +115,7 @@ sequenceDiagram
 - [x] Add backend tests for missing APNs/FCM credentials graceful behavior.
 - [x] Add backend tests for APNs/FCM call payload shaping.
 - [x] Add native project validation for mobile call-id dedupe, pending call persistence, and expired push handling.
+- [x] Add native project validation for caller-side unanswered-call timeout.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
