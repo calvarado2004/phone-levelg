@@ -100,6 +100,11 @@ func TestDirectMessageRecipientsAreExplicitPrivateRooms(t *testing.T) {
 		t.Fatalf("unexpected recipients: %#v", recipients)
 	}
 
+	encodedRecipients := directMessageRecipients("dm%3Aalice%3Abob")
+	if len(encodedRecipients) != 2 || encodedRecipients[0] != "alice" || encodedRecipients[1] != "bob" {
+		t.Fatalf("encoded direct room should parse as private: %#v", encodedRecipients)
+	}
+
 	if recipients := directMessageRecipients("alice:bob"); recipients != nil {
 		t.Fatalf("legacy non-prefixed room must not be treated as private: %#v", recipients)
 	}
@@ -111,6 +116,9 @@ func TestDirectRoomAccessRequiresParticipant(t *testing.T) {
 	}
 	if !canAccessRoom("dm:alice:bob", "alice") {
 		t.Fatal("participant should access private room")
+	}
+	if !canAccessRoom("dm%3Aalice%3Abob", "bob") {
+		t.Fatal("participant should access encoded private room")
 	}
 	if canAccessRoom("dm:alice:bob", "charlie") {
 		t.Fatal("non-participant should not access private room")

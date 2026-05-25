@@ -13,6 +13,7 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 - 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
 - 1-1 private-message notifications can use the bundled `message-notification.mp3` sound. The lobby intentionally remains silent.
 - Chat and attachment encryption now use a server-confirmed session key secret returned at login instead of mutable local invite-code UI state. The mobile session key was bumped so old broken sessions must sign in again.
+- Direct-chat delete and attachment endpoints now handle URL-encoded `dm:` room IDs, and mobile send/attachment buttons no longer depend on WebSocket state because persistence uses HTTP.
 - OpenShift backend deployment now uses a Git-sourced BuildConfig. Backend images are built by OpenShift build pods from committed GitHub source; mobile binaries, local build directories, and Secret objects must not be uploaded through the tracked runtime manifests.
 
 ## Architecture Target
@@ -185,6 +186,8 @@ sequenceDiagram
 - [x] Move direct-chat encryption from local invite-code state to a server-confirmed session key secret.
 - [x] Force fresh mobile login sessions after the encryption-key contract change.
 - [x] Add backend and mobile validation tests so text, attachment metadata, and attachment blob encryption use the same session key secret.
+- [x] Decode URL-encoded direct-chat room IDs on the backend so delete and attachment endpoints accept mobile path encoding.
+- [x] Keep Android/iOS chat send and attachment controls enabled during WebSocket reconnects because messages persist over HTTP.
 - [ ] Replace shared invite-code-derived room keys with per-account/per-device key material.
 - [ ] Add encrypted room-key fan-out for up to three devices per Gmail account.
 - [ ] Add message-authentication failure UI that distinguishes wrong-key history from normal empty chats.

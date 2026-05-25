@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -1037,7 +1038,7 @@ order by room_id, created_at desc`, "dm:"+userID+":%", "dm:%:"+userID)
 }
 
 func (s *server) messages(w http.ResponseWriter, r *http.Request) {
-	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	roomID := roomIDParam(r)
 	if roomID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room required"})
 		return
@@ -1077,7 +1078,7 @@ limit 200`, roomID)
 }
 
 func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
-	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	roomID := roomIDParam(r)
 	var req createMessageRequest
 	if !readJSON(w, r, &req) {
 		return
@@ -1103,7 +1104,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) createAttachment(w http.ResponseWriter, r *http.Request) {
-	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	roomID := roomIDParam(r)
 	var req createAttachmentRequest
 	if !readJSON(w, r, &req) {
 		return
@@ -1149,7 +1150,7 @@ values ($1, $2, $3, $4, $5)`,
 }
 
 func (s *server) getAttachment(w http.ResponseWriter, r *http.Request) {
-	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	roomID := roomIDParam(r)
 	attachmentID := strings.TrimSpace(chi.URLParam(r, "attachmentID"))
 	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
 	if roomID == "" || attachmentID == "" || userID == "" {
@@ -1180,7 +1181,7 @@ where id = $1 and room_id = $2`, attachmentID, roomID).Scan(&item.ID, &item.Room
 }
 
 func (s *server) deleteMessages(w http.ResponseWriter, r *http.Request) {
-	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	roomID := roomIDParam(r)
 	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
 	if roomID == "" || userID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room and user required"})
@@ -1656,11 +1657,23 @@ func fixedECDSASignature(r, s *big.Int, size int) []byte {
 }
 
 func directMessageRecipients(roomID string) []string {
-	parts := strings.Split(roomID, ":")
+	parts := strings.Split(normalizeRoomID(roomID), ":")
 	if len(parts) == 3 && parts[0] == "dm" && parts[1] != "" && parts[2] != "" {
 		return parts[1:]
 	}
 	return nil
+}
+
+func roomIDParam(r *http.Request) string {
+	return normalizeRoomID(chi.URLParam(r, "roomID"))
+}
+
+func normalizeRoomID(roomID string) string {
+	roomID = strings.TrimSpace(roomID)
+	if decoded, err := url.PathUnescape(roomID); err == nil {
+		roomID = decoded
+	}
+	return strings.TrimSpace(roomID)
 }
 
 func canAccessRoom(roomID, userID string) bool {

@@ -354,8 +354,8 @@ export default function App() {
   }, [selectedMember, session]);
   const activeRoomTitle = selectedMember?.displayName ?? "Home";
   const headerTitle = session ? `${activeRoomTitle} - ${session.displayName}` : activeRoomTitle;
-  const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
-  const canSendAttachment = Boolean(session && connected && selectedMember && !sendingAttachment);
+  const canSend = useMemo(() => draft.trim().length > 0 && session, [draft, session]);
+  const canSendAttachment = Boolean(session && selectedMember && !sendingAttachment);
   const callPeerName = callPeer?.displayName ?? activeRoomTitle;
   const isFullScreenCall = callActive;
   const selfReachable = session ? members.find(member => member.id === session.userId)?.reachable !== false : false;

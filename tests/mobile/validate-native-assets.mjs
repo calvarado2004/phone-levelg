@@ -170,6 +170,9 @@ assert.match(appTsx, /stringArraysEqual\(current, nextUnreadRooms\) \? current :
 assert.match(appTsx, /persistEncryptedMessage\(nextText\)[\s\S]*setDraft\(""\)/, "Composer must persist messages over HTTP before clearing the draft");
 assert.match(appTsx, /function persistEncryptedMessage|async function persistEncryptedMessage/, "Message persistence must be shared by normal text and attachment metadata sends");
 assert.match(appTsx, /method: "POST"[\s\S]*senderId: session\.userId[\s\S]*text: encryptedText/, "Shared message persistence must post encrypted text to the backend");
+assert.match(appTsx, /const canSend = useMemo\(\(\) => draft\.trim\(\)\.length > 0 && session/, "Composer send button must enable from session state because message persistence uses HTTP");
+assert.doesNotMatch(appTsx, /const canSend = useMemo\([^\n]*connected/, "Composer send button must not depend on websocket state");
+assert.match(appTsx, /const canSendAttachment = Boolean\(session && selectedMember && !sendingAttachment\)/, "Attachment controls must not depend on websocket state");
 assert.doesNotMatch(appTsx, /sendSocket\("message:send"/, "Composer must not depend on websocket-only message persistence");
 assert.match(appTsx, /requestCallPermissions\(mode\)/, "Call permissions must match voice or video mode");
 assert.match(appTsx, /Notifications\.requestPermissionsAsync\(\{[\s\S]*allowAlert: true[\s\S]*allowSound: true/, "iPhone call alert notifications must have an in-app permission control");
