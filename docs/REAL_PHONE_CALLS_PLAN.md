@@ -120,8 +120,10 @@ sequenceDiagram
 - [x] Add real `FCM_SERVICE_ACCOUNT_JSON` to the OpenShift `phone-levelg-server` secret.
 - [x] Add the real Firebase `google-services.json` to `apps/mobile/android/app/` before release builds.
 - [x] Enroll/use a paid Apple Developer Program team for `io.levelg.phone`.
-- [ ] Enable Push Notifications for the explicit `io.levelg.phone` App ID.
-- [ ] Regenerate/download an iOS development or distribution provisioning profile that contains `aps-environment`.
+- [x] Enable Push Notifications for the explicit `io.levelg.phone` App ID.
+- [x] Regenerate/download an iOS development provisioning profile that contains `aps-environment`.
+- [x] Create/download an Apple Developer APNs Auth Key (`AuthKey_<KEY_ID>.p8`) and store `APNS_TEAM_ID`, `APNS_KEY_ID`, and `APNS_PRIVATE_KEY` in the OpenShift `phone-levelg-server` secret.
+- [x] Use `https://api.sandbox.push.apple.com` for the current Xcode-installed development builds; switch to `https://api.push.apple.com` only for distribution/TestFlight/App Store builds.
 
 ### iOS PushKit And CallKit
 
@@ -261,12 +263,15 @@ Use this path when validating the remaining real-phone behavior:
 1. Open Xcode > Settings > Accounts and refresh/download profiles for the paid Apple Developer team.
 2. In Apple Developer > Certificates, Identifiers & Profiles > Identifiers, create or edit explicit App ID `io.levelg.phone`.
 3. Enable Push Notifications on `io.levelg.phone`.
-4. Regenerate an iOS Development provisioning profile for `io.levelg.phone` that includes `aps-environment`.
-5. Rebuild iOS Release with automatic provisioning:
+4. In Apple Developer > Certificates, Identifiers & Profiles > Keys, create an APNs Auth Key with Apple Push Notifications service enabled, download `AuthKey_<KEY_ID>.p8`, and record the 10-character Key ID.
+5. Store the APNs provider credentials in OpenShift:
+   `oc -n phone-levelg set data secret/phone-levelg-server APNS_TEAM_ID=<TEAM_ID> APNS_KEY_ID=<KEY_ID> APNS_BUNDLE_ID=io.levelg.phone APNS_ENDPOINT=https://api.sandbox.push.apple.com --from-file=APNS_PRIVATE_KEY=local-secrets/AuthKey_<KEY_ID>.p8`
+6. Restart the server deployment:
+   `oc -n phone-levelg rollout restart deployment/phone-levelg-server && oc -n phone-levelg rollout status deployment/phone-levelg-server --timeout=120s`
+7. Regenerate an iOS Development provisioning profile for `io.levelg.phone` that includes `aps-environment`.
+8. Rebuild iOS Release with automatic provisioning:
    `xcodebuild -allowProvisioningUpdates -workspace apps/mobile/ios/PhoneLevelG.xcworkspace -scheme PhoneLevelG -configuration Release -sdk iphoneos -derivedDataPath apps/mobile/ios/DerivedData-device ENABLE_USER_SCRIPT_SANDBOXING=NO build`
-6. Install the built Release app on both connected iPhones:
-   - Carlos's iPhone: `0E794132-0AB9-5FB6-BA0B-F680555A6888`
-   - iPhone: `1EF56DCA-836E-5DEE-9C0E-9514B5EE56CF`
-7. Log in on both iPhones so the app registers the regular APNs token and PushKit VoIP token with the OpenShift backend.
-8. Run locked/background incoming-call tests iPhone-to-iPhone, Android-to-iPhone, and iPhone-to-Android.
-9. Mark the locked-device validation tasks complete only after the calls ring while the callee app is backgrounded, locked, and recently force-closed where the OS allows delivery.
+9. Install the built Release app on the connected iPhones.
+10. Log in on both iPhones so the app registers the regular APNs token and PushKit VoIP token with the OpenShift backend.
+11. Run locked/background incoming-call tests iPhone-to-iPhone, Android-to-iPhone, and iPhone-to-Android.
+12. Mark the locked-device validation tasks complete only after the calls ring while the callee app is backgrounded, locked, and recently force-closed where the OS allows delivery.

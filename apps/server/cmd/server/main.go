@@ -15,6 +15,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -262,7 +263,9 @@ type apnsProvider struct {
 }
 
 func newAPNSProvider(cfg config) *apnsProvider {
-	if cfg.apnsTeamID == "" || cfg.apnsKeyID == "" || cfg.apnsBundleID == "" || cfg.apnsPrivateKey == "" {
+	missing := missingAPNSConfig(cfg)
+	if len(missing) > 0 {
+		slog.Error("disable apns provider; missing config", "missing", strings.Join(missing, ","))
 		return nil
 	}
 	key, err := parseAPNSPrivateKey(cfg.apnsPrivateKey)
@@ -278,6 +281,23 @@ func newAPNSProvider(cfg config) *apnsProvider {
 		endpoint:   strings.TrimRight(cfg.apnsEndpoint, "/"),
 		client:     &http.Client{Timeout: 10 * time.Second},
 	}
+}
+
+func missingAPNSConfig(cfg config) []string {
+	var missing []string
+	if cfg.apnsTeamID == "" {
+		missing = append(missing, "APNS_TEAM_ID")
+	}
+	if cfg.apnsKeyID == "" {
+		missing = append(missing, "APNS_KEY_ID")
+	}
+	if cfg.apnsBundleID == "" {
+		missing = append(missing, "APNS_BUNDLE_ID")
+	}
+	if cfg.apnsPrivateKey == "" {
+		missing = append(missing, "APNS_PRIVATE_KEY")
+	}
+	return missing
 }
 
 func (p *apnsProvider) SendCallPush(ctx context.Context, payload callPushPayload, device pushDevice) error {
@@ -311,7 +331,7 @@ func (p *apnsProvider) SendCallPush(ctx context.Context, payload callPushPayload
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("apns returned %s", resp.Status)
+		return apnsResponseError(resp)
 	}
 	return nil
 }
@@ -345,9 +365,18 @@ func (p *apnsProvider) sendPush(ctx context.Context, token, topic, pushType stri
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("apns returned %s", resp.Status)
+		return apnsResponseError(resp)
 	}
 	return nil
+}
+
+func apnsResponseError(resp *http.Response) error {
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	detail := strings.TrimSpace(string(body))
+	if detail == "" {
+		return fmt.Errorf("apns returned %s", resp.Status)
+	}
+	return fmt.Errorf("apns returned %s: %s", resp.Status, detail)
 }
 
 func (p *apnsProvider) authorizationToken(now time.Time) (string, error) {

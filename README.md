@@ -357,7 +357,23 @@ oc -n phone-levelg set env deployment/phone-levelg-server FCM_SERVICE_ACCOUNT_JS
 
 ### iOS Push Provisioning
 
-Real iPhone background call delivery requires Apple Push Notification service entitlement support. Phone LevelG now uses the paid Apple Developer team for `io.levelg.phone`; keep the explicit App ID configured with Push Notifications enabled and keep development/distribution provisioning profiles regenerated when entitlements or devices change so they include `aps-environment`. Personal/free development teams still cannot create the required Push Notifications profile.
+Real iPhone background call and message delivery requires Apple Push Notification service entitlement support plus server-side APNs provider credentials. Phone LevelG now uses the paid Apple Developer team for `io.levelg.phone`; keep the explicit App ID configured with Push Notifications enabled and keep development/distribution provisioning profiles regenerated when entitlements or devices change so they include `aps-environment`. Personal/free development teams still cannot create the required Push Notifications profile.
+
+The iPhone app only registers with APNs and forwards device tokens to the backend. The OpenShift backend must also authenticate to Apple before it can send pushes. Create an APNs Auth Key in Apple Developer > Certificates, Identifiers & Profiles > Keys with Apple Push Notifications service enabled, then store the values in the `phone-levelg-server` secret:
+
+```sh
+oc -n phone-levelg set data secret/phone-levelg-server \
+  APNS_TEAM_ID=replace-with-apple-team-id \
+  APNS_KEY_ID=replace-with-10-character-key-id \
+  APNS_BUNDLE_ID=io.levelg.phone \
+  APNS_ENDPOINT=https://api.sandbox.push.apple.com \
+  --from-file=APNS_PRIVATE_KEY=local-secrets/AuthKey_REPLACEKEYID.p8
+
+oc -n phone-levelg rollout restart deployment/phone-levelg-server
+oc -n phone-levelg rollout status deployment/phone-levelg-server --timeout=120s
+```
+
+Use `https://api.sandbox.push.apple.com` for Xcode-installed development builds whose embedded profile contains `aps-environment = development`. Switch `APNS_ENDPOINT` to `https://api.push.apple.com` only for distribution/TestFlight/App Store builds. If `APNS_KEY_ID`, `APNS_TEAM_ID`, or `APNS_PRIVATE_KEY` is empty, the backend logs `disable apns provider; missing config` and iPhone background pushes will not work.
 
 ### Android Push Provisioning
 
