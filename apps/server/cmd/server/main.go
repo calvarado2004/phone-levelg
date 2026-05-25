@@ -1313,6 +1313,7 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 			s.storeAndPublishMessage(ctx, channel, roomID, userID, displayName, body.Text)
 		case "call:ring":
 			var body struct {
+				CallID string `json:"callId"`
 				RoomID string `json:"roomId"`
 				Mode   string `json:"mode"`
 			}
@@ -1327,8 +1328,12 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 			if body.Mode != "video" {
 				body.Mode = "voice"
 			}
+			callID := strings.TrimSpace(body.CallID)
+			if callID == "" || len(callID) > 80 {
+				callID = randomID()
+			}
 			payload := callPushPayload{
-				CallID:    randomID(),
+				CallID:    callID,
 				RoomID:    targetRoomID,
 				SenderID:  userID,
 				Sender:    displayName,
@@ -1344,6 +1349,8 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 		case "call:end":
 			var body struct {
 				RoomID string `json:"roomId"`
+				CallID string `json:"callId"`
+				Reason string `json:"reason"`
 			}
 			_ = json.Unmarshal(envelope.Data, &body)
 			targetRoomID := strings.TrimSpace(body.RoomID)
@@ -1357,14 +1364,18 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 				Type: "call:end",
 				Data: map[string]string{
 					"roomId":   targetRoomID,
+					"callId":   strings.TrimSpace(body.CallID),
 					"senderId": userID,
 					"sender":   displayName,
+					"reason":   normalizeCallEndReason(body.Reason),
 				},
 			}
 			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
 		case "call:reject":
 			var body struct {
 				RoomID string `json:"roomId"`
+				CallID string `json:"callId"`
+				Reason string `json:"reason"`
 			}
 			_ = json.Unmarshal(envelope.Data, &body)
 			targetRoomID := strings.TrimSpace(body.RoomID)
@@ -1378,8 +1389,10 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 				Type: "call:reject",
 				Data: map[string]string{
 					"roomId":   targetRoomID,
+					"callId":   strings.TrimSpace(body.CallID),
 					"senderId": userID,
 					"sender":   displayName,
+					"reason":   normalizeCallEndReason(body.Reason),
 				},
 			}
 			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
@@ -1390,6 +1403,17 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 func (s *server) publishCallEvent(ctx context.Context, roomID, senderID string, envelope outboundEnvelope) {
 	for _, recipient := range s.callRecipients(ctx, roomID, senderID) {
 		s.publish(ctx, "user:"+recipient, envelope)
+	}
+}
+
+func normalizeCallEndReason(reason string) string {
+	switch strings.TrimSpace(reason) {
+	case "rejected":
+		return "rejected"
+	case "no-answer":
+		return "no-answer"
+	default:
+		return ""
 	}
 }
 

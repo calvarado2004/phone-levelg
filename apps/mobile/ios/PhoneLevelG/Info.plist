@@ -50,6 +50,8 @@
 	<string>Allow $(PRODUCT_NAME) to access your camera for video calls</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Allow $(PRODUCT_NAME) to access your microphone for voice and video calls</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Allow $(PRODUCT_NAME) to select photos for encrypted 1-1 chat attachments</string>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

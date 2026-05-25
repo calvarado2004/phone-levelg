@@ -33,7 +33,7 @@ import {
   Vibration,
   View
 } from "react-native";
-import { LogLevel, Room, RoomEvent, isVideoTrack, setLogLevel, type VideoTrack as LiveKitVideoTrack } from "livekit-client";
+import { LogLevel, Room, RoomEvent, Track, isVideoTrack, setLogLevel, type VideoTrack as LiveKitVideoTrack } from "livekit-client";
 import {
   Phone,
   PhoneOff,
@@ -132,10 +132,13 @@ const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
 const STORED_SESSION_KEY = "phone-levelg.session.v3";
 const STORED_DEVICE_ID_KEY = "phone-levelg.device.v1";
 const STORED_PENDING_CALL_KEY = "phone-levelg.pendingCall.v1";
+const STORED_PRIVATE_MESSAGE_SOUND_KEY = "phone-levelg.privateMessageSound.v1";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CALL_RING_TIMEOUT_MS = 45 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
+const PRIVATE_MESSAGE_CHANNEL_ID = "private-messages";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
+const PRIVATE_MESSAGE_SOUND = Platform.OS === "android" ? "message_notification.mp3" : "message-notification.mp3";
 const ENCRYPTED_MESSAGE_PREFIX = "plgenc:v1:";
 const ATTACHMENT_MESSAGE_PREFIX = "plgattach:v1:";
 const ENCRYPTED_MESSAGE_UNAVAILABLE = "Encrypted message unavailable";
@@ -188,6 +191,7 @@ type AttachmentUpload = {
   fileName: string;
   mimeType: string;
   sizeBytes: number;
+  base64?: string;
 };
 
 type Member = {
@@ -241,8 +245,8 @@ type SocketEvent =
   | { type: "message:new"; data: Message }
   | { type: "message:clear"; data: { roomId: string; senderId: string } }
   | { type: "call:ring"; data: { callId?: string; roomId: string; senderId: string; sender: string; mode?: "voice" | "video"; expiresAt?: string } }
-  | { type: "call:end"; data: { callId?: string; roomId: string; senderId: string; sender: string } }
-  | { type: "call:reject"; data: { callId?: string; roomId: string; senderId: string; sender: string } }
+  | { type: "call:end"; data: { callId?: string; roomId: string; senderId: string; sender: string; reason?: string } }
+  | { type: "call:reject"; data: { callId?: string; roomId: string; senderId: string; sender: string; reason?: string } }
   | { type: "member:joined"; data: Member };
 
 const QUICK_EMOJIS = ["👍", "😂", "❤️", "🔥", "🎉", "👀"];
@@ -301,6 +305,7 @@ export default function App() {
   ] : []);
   const [draft, setDraft] = useState("");
   const [sendingAttachment, setSendingAttachment] = useState(false);
+  const [privateMessageSoundEnabled, setPrivateMessageSoundEnabled] = useState(true);
   const [connected, setConnected] = useState(false);
   const [callActive, setCallActive] = useState(false);
   const [callStatus, setCallStatus] = useState("Ready");
@@ -320,13 +325,14 @@ export default function App() {
   const [callPeer, setCallPeer] = useState<CallPeer | null>(null);
   const [localVideoTrack, setLocalVideoTrack] = useState<LiveKitVideoTrack | undefined>();
   const [remoteVideoTrack, setRemoteVideoTrack] = useState<LiveKitVideoTrack | undefined>();
-  const [cameraDeviceID, setCameraDeviceID] = useState<string | undefined>();
+  const [cameraFacingMode, setCameraFacingMode] = useState<"user" | "environment">("user");
   const [iosCallAlertPermission, setIOSCallAlertPermission] = useState<PermissionState>("unknown");
   const [iosMicPermission, setIOSMicPermission] = useState<PermissionState>("unknown");
   const [iosCameraPermission, setIOSCameraPermission] = useState<PermissionState>("unknown");
   const socketRef = useRef<WebSocket | null>(null);
   const roomRef = useRef<Room | null>(null);
   const activeCallRoomIDRef = useRef<string | null>(null);
+  const activeCallIDRef = useRef<string | null>(null);
   const activeCallUUIDRef = useRef<string | null>(null);
   const incomingCallRef = useRef<IncomingCall | null>(null);
   const nativeCallsRef = useRef<Record<string, IncomingCall>>({});
@@ -667,6 +673,7 @@ export default function App() {
     if (!call) return;
 
     activeCallUUIDRef.current = callUUID;
+    activeCallIDRef.current = call.callId;
     clearIncomingCallExpirationTimer();
     setIncomingCall(null);
     incomingCallRef.current = null;
@@ -707,6 +714,7 @@ export default function App() {
     const currentCall = incomingCallRef.current;
     if (currentCall && callMatchesPayload(currentCall, payload)) {
       activeCallUUIDRef.current = currentCall.callUUID;
+      activeCallIDRef.current = currentCall.callId;
       clearIncomingCallExpirationTimer();
       setIncomingCall(null);
       incomingCallRef.current = null;
@@ -718,6 +726,7 @@ export default function App() {
 
     const callUUID = createCallUUID();
     activeCallUUIDRef.current = callUUID;
+    activeCallIDRef.current = payload.callId;
     handledCallIDsRef.current.add(payload.callId);
     nativeCallsRef.current[callUUID] = {
       callUUID,
@@ -742,7 +751,7 @@ export default function App() {
     }
     if (payload.senderId === session.userId || isExpiredCall(payload.expiresAt)) return;
 
-    sendSocket("call:reject", { roomId: payload.roomId });
+    sendSocket("call:reject", { roomId: payload.roomId, callId: payload.callId, reason: "rejected" });
     clearNativeCallsForPayload(payload);
     await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     if (incomingCallRef.current && callMatchesPayload(incomingCallRef.current, payload)) {
@@ -976,8 +985,11 @@ export default function App() {
         void decryptMessage(payload.data, inviteCode).then(nextMessage => {
           if (nextMessage.roomId === activeRoomID) {
             setMessages(current => mergeMessages(current, nextMessage));
-          } else {
+          } else if (nextMessage.senderId !== session.userId) {
             setUnreadRoomIDs(current => current.includes(nextMessage.roomId) ? current : [...current, nextMessage.roomId]);
+            if (isDirectRoomID(nextMessage.roomId)) {
+              void notifyPrivateMessage(nextMessage);
+            }
             void refreshMembers();
           }
         });
@@ -997,8 +1009,8 @@ export default function App() {
           void declineIncomingCall({ announce: false });
         }
         clearNativeCallsForPayload(payload.data);
-        if (activeCallRoomIDRef.current === payload.data.roomId) {
-          void endCurrentCall({ announce: false, status: "Call ended" });
+        if (activeCallMatchesPayload(payload.data)) {
+          void endCurrentCall({ announce: false, status: payload.data.reason === "no-answer" ? "No answer" : "Call ended" });
         }
       }
       if (payload.type === "call:reject" && payload.data.senderId !== session.userId) {
@@ -1006,8 +1018,8 @@ export default function App() {
           void declineIncomingCall({ announce: false });
         }
         clearNativeCallsForPayload(payload.data);
-        if (activeCallRoomIDRef.current === payload.data.roomId) {
-          void endCurrentCall({ announce: false, status: "Call rejected" });
+        if (activeCallMatchesPayload(payload.data)) {
+          void endCurrentCall({ announce: false, status: payload.data.reason === "no-answer" ? "No answer" : "Call rejected" });
         }
       }
       if (payload.type === "member:joined") {
@@ -1050,6 +1062,16 @@ export default function App() {
     return () => {
       void stopIncomingCallTone();
     };
+  }, []);
+
+  useEffect(() => {
+    void AsyncStorage.getItem(STORED_PRIVATE_MESSAGE_SOUND_KEY)
+      .then(value => {
+        if (value === "0") {
+          setPrivateMessageSoundEnabled(false);
+        }
+      })
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
@@ -1132,6 +1154,49 @@ export default function App() {
     setCallStatus("Ready");
   }
 
+  function activeCallMatchesPayload(payload: { callId?: string; roomId: string }) {
+    if (!activeCallRoomIDRef.current || payload.roomId !== activeCallRoomIDRef.current) return false;
+    return !payload.callId || !activeCallIDRef.current || payload.callId === activeCallIDRef.current;
+  }
+
+  async function togglePrivateMessageSound() {
+    const nextEnabled = !privateMessageSoundEnabled;
+    setPrivateMessageSoundEnabled(nextEnabled);
+    await AsyncStorage.setItem(STORED_PRIVATE_MESSAGE_SOUND_KEY, nextEnabled ? "1" : "0").catch(() => undefined);
+    if (nextEnabled) {
+      await ensurePrivateMessageNotifications();
+    }
+  }
+
+  async function notifyPrivateMessage(message: Message) {
+    if (!privateMessageSoundEnabled) return;
+    await ensurePrivateMessageNotifications();
+    await Notifications.scheduleNotificationAsync({
+      content: {
+        title: message.sender,
+        body: message.attachment ? `Sent ${message.attachment.mimeType.startsWith("image/") ? "a photo" : "a file"}` : message.text,
+        sound: PRIVATE_MESSAGE_SOUND,
+        priority: Notifications.AndroidNotificationPriority.HIGH
+      },
+      trigger: Platform.OS === "android" ? { channelId: PRIVATE_MESSAGE_CHANNEL_ID } : null
+    }).catch(() => undefined);
+  }
+
+  async function ensurePrivateMessageNotifications() {
+    const currentPermissions = await Notifications.getPermissionsAsync();
+    if (!currentPermissions.granted) {
+      await Notifications.requestPermissionsAsync();
+    }
+
+    if (Platform.OS === "android") {
+      await Notifications.setNotificationChannelAsync(PRIVATE_MESSAGE_CHANNEL_ID, {
+        name: "Private messages",
+        importance: Notifications.AndroidImportance.HIGH,
+        sound: PRIVATE_MESSAGE_SOUND
+      });
+    }
+  }
+
   function sendSocket(type: string, data: unknown) {
     if (socketRef.current?.readyState !== WebSocket.OPEN) return false;
     socketRef.current.send(JSON.stringify({ type, data }));
@@ -1142,16 +1207,7 @@ export default function App() {
     if (!session || !text.trim()) return;
     const nextText = text.trim();
     try {
-      const encryptedText = await encryptMessageText(activeRoomID, nextText, inviteCode);
-      const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/messages`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          senderId: session.userId,
-          displayName: session.displayName,
-          text: encryptedText
-        })
-      });
+      const payload = await persistEncryptedMessage(nextText);
       const savedMessage = await decryptMessage(payload.message as Message, inviteCode);
       setMessages(current => mergeMessages(current, savedMessage));
       setDraft("");
@@ -1171,8 +1227,7 @@ export default function App() {
         return;
       }
 
-      const fileBase64 = await FileSystem.readAsStringAsync(picked.uri, { encoding: FileSystem.EncodingType.Base64 });
-      const fileBytes = naclUtil.decodeBase64(fileBase64);
+      const fileBytes = await readPickedAttachmentBytes(picked);
       if (fileBytes.length > MAX_ATTACHMENT_BYTES) {
         Alert.alert("File too large", "Send files up to 8 MB for now.");
         return;
@@ -1200,12 +1255,31 @@ export default function App() {
         sizeBytes: picked.sizeBytes,
         nonce: naclUtil.encodeBase64(nonce)
       };
-      await sendMessage(`${ATTACHMENT_MESSAGE_PREFIX}${JSON.stringify(metadata)}`);
-    } catch {
+      const messagePayload = await persistEncryptedMessage(`${ATTACHMENT_MESSAGE_PREFIX}${JSON.stringify(metadata)}`);
+      const savedMessage = await decryptMessage(messagePayload.message as Message, inviteCode);
+      setMessages(current => mergeMessages(current, savedMessage));
+    } catch (error) {
+      console.warn("Attachment send failed", error);
       Alert.alert("Attachment not sent", "The encrypted file was not saved. Check the connection and try again.");
     } finally {
       setSendingAttachment(false);
     }
+  }
+
+  async function persistEncryptedMessage(text: string) {
+    if (!session) {
+      throw new Error("missing session");
+    }
+    const encryptedText = await encryptMessageText(activeRoomID, text, inviteCode);
+    return fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        senderId: session.userId,
+        displayName: session.displayName,
+        text: encryptedText
+      })
+    });
   }
 
   async function openAttachment(message: Message) {
@@ -1271,6 +1345,7 @@ export default function App() {
       await endCurrentCall({ announce: false, status: "Switching call" });
     }
     activeCallRoomIDRef.current = roomID;
+    activeCallIDRef.current = announce ? createCallUUID() : activeCallIDRef.current;
     setCallPeer(resolveCallPeer(roomID));
     if (!activeCallUUIDRef.current) {
       const callUUID = createCallUUID();
@@ -1322,7 +1397,7 @@ export default function App() {
         setCallStatus("Connected");
         setRemoteParticipantCount(room.remoteParticipants.size);
         if (announce) {
-          sendSocket("call:ring", { roomId: roomID, mode });
+          sendSocket("call:ring", { roomId: roomID, callId: activeCallIDRef.current, mode });
           scheduleOutgoingCallUnavailable(room);
         }
         if (activeCallUUIDRef.current) {
@@ -1371,11 +1446,11 @@ export default function App() {
       await room.localParticipant.setMicrophoneEnabled(true);
       if (mode === "video") {
         try {
-          const cameraPublication = await room.localParticipant.setCameraEnabled(true, { facingMode: "user" });
+          const cameraPublication = await room.localParticipant.setCameraEnabled(true, { facingMode: "user", resolution: { width: 1280, height: 720, frameRate: 30 } });
           if (isVideoTrack(cameraPublication?.track)) {
             setLocalVideoTrack(cameraPublication.track);
           }
-          await loadCameraDevice(room);
+          setCameraFacingMode("user");
           syncVideoTracks(room);
         } catch {
           setCallMode("voice");
@@ -1396,7 +1471,7 @@ export default function App() {
     clearOutgoingCallTimeout();
     outgoingCallTimeoutRef.current = setTimeout(() => {
       if (roomRef.current === room && room.remoteParticipants.size === 0) {
-        void endCurrentCall({ announce: true, status: "Unavailable" });
+        void endCurrentCall({ announce: true, status: "No answer", reason: "no-answer" });
       }
     }, CALL_RING_TIMEOUT_MS);
   }
@@ -1408,13 +1483,14 @@ export default function App() {
     }
   }
 
-  async function endCurrentCall({ announce, status, native = true }: { announce: boolean; status: string; native?: boolean }) {
+  async function endCurrentCall({ announce, status, native = true, reason }: { announce: boolean; status: string; native?: boolean; reason?: string }) {
     await stopIncomingCallTone();
     clearOutgoingCallTimeout();
     const roomID = activeCallRoomIDRef.current;
+    const callID = activeCallIDRef.current;
     const callUUID = activeCallUUIDRef.current;
     if (announce && roomID) {
-      sendSocket("call:end", { roomId: roomID });
+      sendSocket("call:end", { roomId: roomID, callId: callID, reason });
     }
     if (native && callUUID) {
       getNativeCallKeep()?.endCall(callUUID);
@@ -1422,6 +1498,7 @@ export default function App() {
     const room = roomRef.current;
     roomRef.current = null;
     activeCallRoomIDRef.current = null;
+    activeCallIDRef.current = null;
     activeCallUUIDRef.current = null;
     if (callUUID) {
       delete nativeCallsRef.current[callUUID];
@@ -1435,7 +1512,7 @@ export default function App() {
     }
     setLocalVideoTrack(undefined);
     setRemoteVideoTrack(undefined);
-    setCameraDeviceID(undefined);
+    setCameraFacingMode("user");
     setCallPeer(null);
     await resetAudioSession();
     setCallActive(false);
@@ -1446,7 +1523,7 @@ export default function App() {
   async function declineIncomingCall(options: { announce?: boolean } = {}) {
     const call = incomingCallRef.current;
     if (options.announce !== false && call) {
-      sendSocket("call:reject", { roomId: call.roomId });
+      sendSocket("call:reject", { roomId: call.roomId, callId: call.callId, reason: "rejected" });
       getNativeCallKeep()?.rejectCall(call.callUUID);
     } else if (call) {
       getNativeCallKeep()?.endCall(call.callUUID);
@@ -1466,6 +1543,7 @@ export default function App() {
     if (!incomingCall) return;
     const nextCall = incomingCall;
     activeCallUUIDRef.current = nextCall.callUUID;
+    activeCallIDRef.current = nextCall.callId;
     setCallPeer({ displayName: nextCall.sender });
     clearIncomingCallExpirationTimer();
     setIncomingCall(null);
@@ -1578,34 +1656,16 @@ export default function App() {
     setRemoteVideoTrack(nextRemoteVideoTrack);
   }
 
-  async function loadCameraDevice(room: Room) {
-    const currentDevice = room.getActiveDevice("videoinput");
-    if (currentDevice) {
-      setCameraDeviceID(currentDevice);
-      return;
-    }
-    const devices = await Room.getLocalDevices("videoinput", false).catch(() => []);
-    setCameraDeviceID(devices[0]?.deviceId);
-  }
-
   async function flipCamera() {
     const room = roomRef.current;
     if (!room || callMode !== "video") return;
-    const devices = await Room.getLocalDevices("videoinput", true).catch(() => []);
-    if (devices.length < 2) {
-      Alert.alert("Camera unavailable", "This device did not report a second camera.");
-      return;
-    }
-
-    const activeDeviceID = cameraDeviceID ?? room.getActiveDevice("videoinput") ?? devices[0]?.deviceId;
-    const activeIndex = Math.max(0, devices.findIndex(device => device.deviceId === activeDeviceID));
-    const nextDevice = devices[(activeIndex + 1) % devices.length];
-    if (!nextDevice) return;
+    const nextFacingMode = cameraFacingMode === "user" ? "environment" : "user";
 
     try {
       setLocalVideoTrack(undefined);
-      await room.switchActiveDevice("videoinput", nextDevice.deviceId);
-      setCameraDeviceID(nextDevice.deviceId);
+      const cameraPublication = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      await cameraPublication?.videoTrack?.restartTrack({ facingMode: nextFacingMode, resolution: { width: 1280, height: 720, frameRate: 30 } });
+      setCameraFacingMode(nextFacingMode);
       syncVideoTracks(room);
       setTimeout(() => {
         if (roomRef.current === room) {
@@ -1733,8 +1793,11 @@ export default function App() {
               <CameraStreamView key={remoteVideoTrack.sid} track={remoteVideoTrack} zOrder={0} />
             ) : (
               <View style={styles.fullScreenVideoPlaceholder}>
-                <Video color="#d8ccff" size={36} />
-                <Text style={styles.fullScreenPlaceholderText}>Waiting for video</Text>
+                <View style={styles.fullScreenVideoWaitingAvatar}>
+                  <UserAvatar displayName={callPeerName} avatarURL={callPeer?.avatarURL} size={116} textStyle={styles.voiceAvatarText} />
+                </View>
+                <Text style={styles.fullScreenVideoWaitingName} numberOfLines={1}>{callPeerName}</Text>
+                <Text style={styles.fullScreenVideoWaitingStatus}>Calling {callPeerName}</Text>
               </View>
             )}
           </View>
@@ -1866,6 +1929,8 @@ export default function App() {
             </Pressable>
           </View>
         )}
+
+        <MessageSoundToggle enabled={privateMessageSoundEnabled} onPress={() => void togglePrivateMessageSound()} />
 
         {incomingCall && (
           <View style={styles.incomingCallOverlay}>
@@ -2081,6 +2146,27 @@ function PermissionToggle({ icon: Icon, label, state, onPress }: { icon: Compone
   );
 }
 
+function MessageSoundToggle({ enabled, onPress }: { enabled: boolean; onPress: () => void }) {
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityState={{ checked: enabled }}
+      accessibilityLabel="Private message sound"
+      hitSlop={8}
+      style={styles.messageSoundToggle}
+      onPress={onPress}
+    >
+      <Bell color={enabled ? "#062a1a" : "#f8fafc"} size={15} />
+      <Text style={[styles.messageSoundToggleText, enabled && styles.messageSoundToggleTextOn]} numberOfLines={1}>
+        Private message sound
+      </Text>
+      <View style={[styles.messageSoundSwitch, enabled && styles.messageSoundSwitchOn]}>
+        <View style={[styles.messageSoundKnob, enabled && styles.messageSoundKnobOn]} />
+      </View>
+    </Pressable>
+  );
+}
+
 function CameraStreamView({ track, mirror, zOrder }: { track: LiveKitVideoTrack; mirror?: boolean; zOrder?: number }) {
   const [streamURL, setStreamURL] = useState("");
 
@@ -2223,14 +2309,15 @@ function parseAttachmentMessage(text: string): MessageAttachment | null {
 }
 
 async function pickDocumentAttachment(): Promise<AttachmentUpload | null> {
-  const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
+  const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false, base64: true });
   if (result.canceled || !result.assets[0]) return null;
   const asset = result.assets[0];
   return {
     uri: asset.uri,
     fileName: sanitizeFileName(asset.name || `document-${Date.now()}`),
     mimeType: asset.mimeType || "application/octet-stream",
-    sizeBytes: asset.size ?? await fileSize(asset.uri)
+    sizeBytes: asset.size ?? base64ByteLength(asset.base64) ?? await fileSize(asset.uri),
+    base64: asset.base64
   };
 }
 
@@ -2243,7 +2330,8 @@ async function pickImageAttachment(): Promise<AttachmentUpload | null> {
   const result = await ImagePicker.launchImageLibraryAsync({
     mediaTypes: ImagePicker.MediaTypeOptions.Images,
     quality: 0.9,
-    allowsEditing: false
+    allowsEditing: false,
+    base64: true
   });
   if (result.canceled || !result.assets[0]) return null;
   const asset = result.assets[0];
@@ -2251,13 +2339,38 @@ async function pickImageAttachment(): Promise<AttachmentUpload | null> {
     uri: asset.uri,
     fileName: sanitizeFileName(asset.fileName || `photo-${Date.now()}.jpg`),
     mimeType: asset.mimeType || "image/jpeg",
-    sizeBytes: asset.fileSize ?? await fileSize(asset.uri)
+    sizeBytes: asset.fileSize ?? base64ByteLength(asset.base64) ?? await fileSize(asset.uri),
+    base64: asset.base64 ?? undefined
   };
+}
+
+async function readPickedAttachmentBytes(picked: AttachmentUpload) {
+  if (picked.base64) {
+    return naclUtil.decodeBase64(picked.base64);
+  }
+  try {
+    const fileBase64 = await FileSystem.readAsStringAsync(picked.uri, { encoding: FileSystem.EncodingType.Base64 });
+    return naclUtil.decodeBase64(fileBase64);
+  } catch {
+    const response = await fetch(picked.uri);
+    if (!response.ok) {
+      throw new Error(`attachment file read failed with status ${response.status}`);
+    }
+    return new Uint8Array(await response.arrayBuffer());
+  }
 }
 
 async function fileSize(uri: string) {
   const info = await FileSystem.getInfoAsync(uri);
   return info.exists ? info.size ?? 0 : 0;
+}
+
+function base64ByteLength(value?: string | null) {
+  if (!value) return null;
+  const trimmed = value.replace(/\s/g, "");
+  if (!trimmed) return 0;
+  const padding = trimmed.endsWith("==") ? 2 : trimmed.endsWith("=") ? 1 : 0;
+  return Math.floor((trimmed.length * 3) / 4) - padding;
 }
 
 function sanitizeFileName(value: string) {
@@ -2346,6 +2459,15 @@ function callParticipantLabel(mode: "voice" | "video", remoteParticipantCount: n
 
 function directRoomID(firstID: string, secondID: string) {
   return `dm:${[firstID, secondID].sort().join(":")}`;
+}
+
+function isDirectRoomID(roomID: string) {
+  return directMessageRecipients(roomID).length === 2;
+}
+
+function directMessageRecipients(roomID: string) {
+  const parts = roomID.split(":");
+  return parts.length === 3 && parts[0] === "dm" && parts[1] && parts[2] ? parts.slice(1) : [];
 }
 
 function normalizeIncomingCallPayload(data: unknown): IncomingCallPayload | null {
@@ -2717,11 +2839,28 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: "#140a24"
   },
-  fullScreenPlaceholderText: {
+  fullScreenVideoWaitingAvatar: {
+    width: 116,
+    height: 116,
+    borderRadius: 38,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+    backgroundColor: "#d8ccff",
+    marginBottom: 18
+  },
+  fullScreenVideoWaitingName: {
+    maxWidth: "78%",
+    color: "#ffffff",
+    fontSize: 30,
+    fontWeight: "900",
+    textAlign: "center"
+  },
+  fullScreenVideoWaitingStatus: {
     color: "#d8ccff",
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: "800",
-    marginTop: 12
+    marginTop: 8
   },
   fullScreenCallHeader: {
     position: "absolute",
@@ -2949,6 +3088,44 @@ const styles = StyleSheet.create({
     backgroundColor: "#3c245f",
     borderWidth: 1,
     borderColor: "#6d46a3"
+  },
+  messageSoundToggle: {
+    minHeight: 42,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 14,
+    backgroundColor: "#ebe7ff",
+    borderBottomWidth: 1,
+    borderBottomColor: "#d8ccff"
+  },
+  messageSoundToggleText: {
+    flex: 1,
+    color: "#24123d",
+    fontSize: 13,
+    fontWeight: "800"
+  },
+  messageSoundToggleTextOn: {
+    color: "#062a1a"
+  },
+  messageSoundSwitch: {
+    width: 44,
+    height: 24,
+    borderRadius: 12,
+    padding: 3,
+    backgroundColor: "#7c8794"
+  },
+  messageSoundSwitchOn: {
+    backgroundColor: "#33c179"
+  },
+  messageSoundKnob: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: "#ffffff"
+  },
+  messageSoundKnobOn: {
+    transform: [{ translateX: 20 }]
   },
   incomingCallOverlay: {
     position: "absolute",

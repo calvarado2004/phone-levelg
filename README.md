@@ -156,7 +156,9 @@ flowchart TB
 
   subgraph OCP["OpenShift deployment"]
     Route["Private OpenShift route"]
-    Build["Binary BuildConfig\ninternal registry image"]
+    GitHub["GitHub repo\ncommitted source"]
+    Build["Git-sourced BuildConfig\ncluster build container"]
+    Registry["OpenShift internal registry\nbackend image"]
     Deploy["Go API Deployment"]
     Secret["Server Secret\ninvite, LiveKit,\nAPNs keys, FCM service account"]
     OcpPG["Postgres StatefulSet\npx-csi-db PVC"]
@@ -169,8 +171,10 @@ flowchart TB
   Compose --> LocalPG
   Compose --> LocalRedis
   Compose --> LocalLiveKit
+  GitHub --> Build
+  Build --> Registry
   Route --> Deploy
-  Build --> Deploy
+  Registry --> Deploy
   Secret --> Deploy
   Deploy --> OcpPG
   Deploy --> OcpRedis
@@ -213,6 +217,7 @@ It provides:
 - private 1-1 chats between members
 - client-side encrypted message bodies for new chat messages
 - encrypted picture and document sharing in 1-1 chats
+- optional private-message notification sound for 1-1 chats only, using `ringtones/message-notification.mp3`
 - private-chat deletion from the selected direct conversation
 - real-time messages over WebSocket
 - emoji quick actions
@@ -225,6 +230,10 @@ It provides:
 - Android FCM call pushes through a native Firebase Messaging service
 - iOS PushKit/CallKit call pushes once Apple provisioning is active
 - native Android and iOS projects for IDE/device builds
+
+Encrypted picture attachments require native photo-library permissions. iOS declares `NSPhotoLibraryUsageDescription`; Android declares `READ_MEDIA_IMAGES` for modern devices and keeps `READ_EXTERNAL_STORAGE` for Android 12 and older. Photo and document pickers request platform-provided base64 bytes first, then fall back to readable app-cache/content URIs before local encryption. Document attachments use the platform document picker and do not expose readable file contents to the backend.
+
+Private 1-1 chat notifications use the bundled `message-notification.mp3` sound through a dedicated Android notification channel and the iOS notification sound path. Lobby messages stay silent. Users can turn the private-message sound on or off from the in-app toggle; the preference is stored locally on each device.
 
 Important environment variables:
 
@@ -481,7 +490,8 @@ They create:
 
 - namespace `phone-levelg`
 - backend `ImageStream`
-- backend binary `BuildConfig`
+- backend Git-sourced `BuildConfig`
+- backend GitHub webhook secret placeholder
 - backend `Deployment`, `Service`, and `Route`
 - Postgres `StatefulSet`, `Service`, Secret, and PVC
 - Redis `StatefulSet`, `Service`, and PVC
@@ -496,10 +506,17 @@ oc apply -f deploy/openshift/server.yaml
 oc apply -f deploy/openshift/livekit.yaml
 ```
 
-Build the backend into the OpenShift internal registry:
+Backend build contract:
 
-```sh
-oc start-build phone-levelg-server -n phone-levelg --from-dir=. --follow
+- GitHub is the source of truth. Commit and push backend changes first.
+- OpenShift clones the GitHub repo in its BuildConfig pod, runs `apps/server/Dockerfile`, and pushes the resulting backend image into the internal registry.
+- Do not upload Android APKs, iOS apps, local build directories, or ad hoc backend binaries to OpenShift.
+- Mobile release binaries are built and installed for devices outside OpenShift. OpenShift only runs backend, Postgres, Redis, and LiveKit objects.
+
+The backend BuildConfig is configured with Git source:
+
+```text
+https://github.com/calvarado2004/phone-levelg.git
 ```
 
 The backend deployment pulls:
@@ -507,6 +524,8 @@ The backend deployment pulls:
 ```text
 image-registry.openshift-image-registry.svc:5000/phone-levelg/phone-levelg-server:latest
 ```
+
+Configure the GitHub webhook on the BuildConfig after replacing the placeholder `phone-levelg-github-webhook` secret with a private value. GitHub pushes should trigger the backend build; manual local directory uploads are not part of the normal deployment flow.
 
 Check rollout:
 

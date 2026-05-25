@@ -12,6 +12,7 @@ React Native / Expo client for iOS and Android.
 - Real-time messages over WebSocket.
 - Client-side encrypted message bodies for new messages.
 - Encrypted photo and document attachments in 1-1 chats.
+- Optional private-message notification sound for 1-1 chats only; the lobby remains silent.
 - Quick emoji reactions.
 - Compact cat meme quick messages.
 - Voice/video call join through LiveKit.
@@ -62,7 +63,11 @@ Direct chats can be deleted from the selected private conversation. Deletion cle
 
 New message bodies are encrypted before they are sent to the backend. The server stores and relays opaque `plgenc:v1` envelopes, and this app decrypts history and live websocket messages locally. Existing plaintext rows remain readable during rollout.
 
-Photo and document attachments are available only inside 1-1 chats. File bytes are encrypted locally before upload; filename/type metadata is carried inside the encrypted `plgattach:v1` chat message so the backend only stores opaque blobs.
+Photo and document attachments are available only inside 1-1 chats. File bytes are loaded from picker-provided base64 data when available, with app-cache/content URI fallbacks, then encrypted locally before upload. Filename/type metadata is carried inside the encrypted `plgattach:v1` chat message so the backend only stores opaque blobs.
+
+iOS must declare `NSPhotoLibraryUsageDescription` for picture selection. Android must declare `READ_MEDIA_IMAGES` on modern devices and `READ_EXTERNAL_STORAGE` with `maxSdkVersion=32` for older devices.
+
+Private 1-1 message notifications use `message-notification.mp3`, packaged as `message-notification.mp3` on iOS and `message_notification.mp3` in Android raw resources. The sound is controlled by the in-app private-message sound toggle and is never used for lobby messages.
 
 ## Background Delivery
 

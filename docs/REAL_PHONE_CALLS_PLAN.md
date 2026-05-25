@@ -6,10 +6,13 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 
 - Current foreground calls work through WebSocket signaling plus LiveKit media.
 - Native wake-up delivery is implemented through APNs/PushKit + CallKit on iOS and FCM + full-screen incoming-call UI on Android.
+- Call reject and no-answer events now carry the same call id as the outgoing ring, so the caller's attempt ends immediately with `Call rejected` or `No answer` instead of waiting ambiguously.
 - Locked/background validation remains the main open item: the latest release builds are installed, but both platforms still need repeated physical-device tests while locked, backgrounded, and force-closed.
 - Google account creation now uses the native Google Sign-In SDK on Android/iOS. AuthSession remains only for web/dev browser flows.
 - Message bodies are encrypted on the mobile client before backend persistence. The current phase is server-blind shared room encryption; per-device key exchange is the next hardening phase.
 - 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
+- 1-1 private-message notifications can use the bundled `message-notification.mp3` sound. The lobby intentionally remains silent.
+- OpenShift backend deployment now uses a Git-sourced BuildConfig. Backend images are built by OpenShift build pods from committed GitHub source; mobile binaries and local build directories must not be uploaded to the cluster.
 
 ## Architecture Target
 
@@ -145,7 +148,15 @@ sequenceDiagram
 - [x] Deduplicate foreground WebSocket ring and native push ring for the same `callId`.
 - [x] Persist pending incoming call metadata long enough for native action handling.
 - [x] Ensure expired pushes do not show call UI.
-- [x] Ensure caller sees `Call rejected`, `Call ended`, or `Unavailable`.
+- [x] Ensure caller sees `Call rejected`, `Call ended`, or `No answer`.
+- [x] Preserve caller-generated call ids through backend `call:ring`, `call:end`, and `call:reject` events.
+- [x] End the caller's active attempt immediately when the callee rejects or ignores the matching call.
+- [x] Replace the video-call waiting placeholder with phone-style contact avatar/name/status.
+- [x] Switch video camera by logical front/back facing mode instead of cycling every physical iPhone rear lens.
+- [x] Use stable 720p/30fps video capture constraints to avoid poor low-light tablet camera selections.
+- [x] Add a dedicated 1-1 private-message notification sound from `ringtones/message-notification.mp3`.
+- [x] Keep lobby message notifications silent.
+- [x] Add a local in-app toggle for private-message notification sound.
 - [x] Route Android native Answer actions into the existing LiveKit join path.
 - [ ] Keep local and remote video behavior unchanged after push-based entry.
 
@@ -166,6 +177,10 @@ sequenceDiagram
 - [x] Delete direct-chat attachments when the direct chat history is deleted.
 - [x] Add backend integration coverage for direct-chat attachment access and cleanup.
 - [x] Add mobile validation coverage for encrypted document/photo picker wiring.
+- [x] Add iOS photo-library usage permission to prevent crashes when selecting encrypted pictures.
+- [x] Add Android modern and legacy photo-library permissions for encrypted picture selection.
+- [x] Use picker-provided base64 bytes for encrypted pictures and documents, with URI fallbacks for platform providers.
+- [x] Persist attachment metadata through a throwing message path so Android/iOS upload failures are not swallowed.
 - [ ] Replace shared invite-code-derived room keys with per-account/per-device key material.
 - [ ] Add encrypted room-key fan-out for up to three devices per Gmail account.
 - [ ] Add message-authentication failure UI that distinguishes wrong-key history from normal empty chats.
@@ -197,6 +212,9 @@ sequenceDiagram
 
 - [x] Run backend unit tests.
 - [x] Run mobile typecheck and native asset checks.
+- [x] Change OpenShift backend BuildConfig from binary uploads to GitHub source.
+- [x] Document that OpenShift builds backend images from GitHub source and never receives mobile binaries.
+- [x] Add manifest validation that rejects Binary BuildConfigs.
 - [x] Deploy backend to OpenShift.
 - [x] Build iOS Release app.
 - [x] Build Android Release APK.

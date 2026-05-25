@@ -4,8 +4,8 @@ test("login screen is presentable on mobile viewport", async ({ page }) => {
   await page.goto("/?screen=login");
 
   await expect(page.getByText("Phone LevelG")).toBeVisible();
-  await expect(page.getByPlaceholder("Google email")).toBeVisible();
-  await expect(page.getByPlaceholder("Display name")).toBeVisible();
+  await expect(page.getByText(/Continue with Google|Configure Google OAuth/)).toBeVisible();
+  await expect(page.getByText("Gmail account, name, and profile icon")).toBeVisible();
   await expect(page.getByPlaceholder("Server URL")).toBeVisible();
   await expect(page.getByPlaceholder("Server secret")).toBeVisible();
   await expect(page.getByText("Connect")).toBeVisible();
@@ -48,6 +48,8 @@ test("incoming call screen can be answered", async ({ page }) => {
   });
 
   await page.getByLabel("Answer incoming call").click();
-  await expect(page.getByText("Calling Ana")).toBeVisible();
+  await expect(page.getByText("Calling Ana").first()).toBeVisible();
+  await expect(page.getByText("Ana", { exact: true })).toBeVisible();
+  await expect(page.getByText("Waiting for video")).toHaveCount(0);
   await expect(page.getByText("Connected")).toBeVisible();
 });

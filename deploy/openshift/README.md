@@ -9,7 +9,8 @@ Storage class for PVC-backed services: `px-csi-db`
 - `server.yaml`
   - namespace
   - local OpenShift ImageStream
-  - binary BuildConfig
+  - Git-sourced BuildConfig
+  - GitHub webhook secret placeholder
   - backend secret
   - backend Deployment
   - backend Service
@@ -39,8 +40,21 @@ oc apply -f deploy/openshift/postgres.yaml
 oc apply -f deploy/openshift/redis.yaml
 oc apply -f deploy/openshift/server.yaml
 oc apply -f deploy/openshift/livekit.yaml
-oc start-build phone-levelg-server -n phone-levelg --from-dir=. --follow
 ```
+
+## Build Contract
+
+OpenShift builds only backend runtime artifacts. Android APKs, iOS apps, local build directories, and ad hoc backend binaries must not be uploaded into the cluster.
+
+The `phone-levelg-server` BuildConfig clones this repository from GitHub:
+
+```text
+https://github.com/calvarado2004/phone-levelg.git
+```
+
+The build pod runs `apps/server/Dockerfile` inside OpenShift and pushes the resulting backend image into the internal registry. Commit and push source changes to GitHub first, then let the GitHub webhook trigger the BuildConfig.
+
+Replace the placeholder `phone-levelg-github-webhook` secret value in OpenShift with a private webhook secret and configure the GitHub repository webhook to point at the BuildConfig webhook URL.
 
 ## Internal Registry
 

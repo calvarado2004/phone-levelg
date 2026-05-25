@@ -1104,7 +1104,7 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 
 	if err := alice.WriteJSON(wsEnvelope{
 		Type: "call:ring",
-		Data: json.RawMessage(`{"mode":"video"}`),
+		Data: json.RawMessage(`{"callId":"alice-video-call-1","mode":"video"}`),
 	}); err != nil {
 		t.Fatalf("send direct call ring: %v", err)
 	}
@@ -1133,8 +1133,8 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	if ringPayload.RoomID != aliceRoomID || ringPayload.SenderID != "alice" || ringPayload.Mode != "video" {
 		t.Fatalf("unexpected ring payload: %#v", ringPayload)
 	}
-	if ringPayload.CallID == "" {
-		t.Fatal("expected direct ring payload to include call id")
+	if ringPayload.CallID != "alice-video-call-1" {
+		t.Fatalf("expected direct ring payload to preserve caller call id, got %q", ringPayload.CallID)
 	}
 
 	pushCall := pushRecorder.waitForCall(t, 1)[0]
@@ -1230,7 +1230,7 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 
 	if err := alice.WriteJSON(wsEnvelope{
 		Type: "call:ring",
-		Data: json.RawMessage(`{"mode":"voice"}`),
+		Data: json.RawMessage(`{"callId":"lobby-call-1","mode":"voice"}`),
 	}); err != nil {
 		t.Fatalf("send lobby call ring: %v", err)
 	}
@@ -1259,13 +1259,13 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 	if ringPayload.RoomID != "home" || ringPayload.SenderID != "alice" || ringPayload.Mode != "voice" {
 		t.Fatalf("unexpected ring payload: %#v", ringPayload)
 	}
-	if ringPayload.CallID == "" {
-		t.Fatal("expected lobby ring payload to include call id")
+	if ringPayload.CallID != "lobby-call-1" {
+		t.Fatalf("expected lobby ring payload to preserve caller call id, got %q", ringPayload.CallID)
 	}
 
 	if err := alice.WriteJSON(wsEnvelope{
 		Type: "call:end",
-		Data: json.RawMessage(`{"roomId":"home"}`),
+		Data: json.RawMessage(`{"roomId":"home","callId":"lobby-call-1","reason":"no-answer"}`),
 	}); err != nil {
 		t.Fatalf("send lobby call end: %v", err)
 	}
@@ -1283,18 +1283,20 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 	var endPayload struct {
 		RoomID   string `json:"roomId"`
 		SenderID string `json:"senderId"`
+		CallID   string `json:"callId"`
+		Reason   string `json:"reason"`
 	}
 	encodedEndPayload, _ := json.Marshal(ended.Data)
 	if err := json.Unmarshal(encodedEndPayload, &endPayload); err != nil {
 		t.Fatalf("decode end payload: %v", err)
 	}
-	if endPayload.RoomID != "home" || endPayload.SenderID != "alice" {
+	if endPayload.RoomID != "home" || endPayload.SenderID != "alice" || endPayload.CallID != "lobby-call-1" || endPayload.Reason != "no-answer" {
 		t.Fatalf("unexpected end payload: %#v", endPayload)
 	}
 
 	if err := bob.WriteJSON(wsEnvelope{
 		Type: "call:reject",
-		Data: json.RawMessage(`{"roomId":"home"}`),
+		Data: json.RawMessage(`{"roomId":"home","callId":"lobby-call-1","reason":"rejected"}`),
 	}); err != nil {
 		t.Fatalf("send lobby call reject: %v", err)
 	}
@@ -1312,12 +1314,14 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 	var rejectPayload struct {
 		RoomID   string `json:"roomId"`
 		SenderID string `json:"senderId"`
+		CallID   string `json:"callId"`
+		Reason   string `json:"reason"`
 	}
 	encodedRejectPayload, _ := json.Marshal(rejected.Data)
 	if err := json.Unmarshal(encodedRejectPayload, &rejectPayload); err != nil {
 		t.Fatalf("decode reject payload: %v", err)
 	}
-	if rejectPayload.RoomID != "home" || rejectPayload.SenderID != "bob" {
+	if rejectPayload.RoomID != "home" || rejectPayload.SenderID != "bob" || rejectPayload.CallID != "lobby-call-1" || rejectPayload.Reason != "rejected" {
 		t.Fatalf("unexpected reject payload: %#v", rejectPayload)
 	}
 }

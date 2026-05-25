@@ -27,8 +27,20 @@ assert.equal(namespace.metadata.name, "phone-levelg");
 
 const buildConfig = find("BuildConfig", "phone-levelg-server");
 assert.equal(buildConfig.metadata.namespace, "phone-levelg");
+assert.equal(buildConfig.spec.source.type, "Git");
+assert.equal(buildConfig.spec.source.git.uri, "https://github.com/calvarado2004/phone-levelg.git");
+assert.equal(buildConfig.spec.source.git.ref, "main");
 assert.equal(buildConfig.spec.strategy.dockerStrategy.dockerfilePath, "apps/server/Dockerfile");
 assert.equal(buildConfig.spec.output.to.name, "phone-levelg-server:latest");
+assert.ok(
+  buildConfig.spec.triggers.some(trigger => trigger.type === "GitHub" && trigger.github?.secretReference?.name === "phone-levelg-github-webhook"),
+  "backend BuildConfig must be triggerable from GitHub webhooks"
+);
+
+const buildManifests = resources.filter(({ resource }) => resource.kind === "BuildConfig");
+for (const { file, resource } of buildManifests) {
+  assert.notEqual(resource.spec.source?.type, "Binary", `${file}: OpenShift builds must use Git source, not binary uploads`);
+}
 
 const deployment = find("Deployment", "phone-levelg-server");
 assert.equal(deployment.metadata.namespace, "phone-levelg");

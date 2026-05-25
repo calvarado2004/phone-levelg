@@ -16,7 +16,10 @@ metadata:
   namespace: phone-levelg
 spec:
   source:
-    type: Binary
+    type: Git
+    git:
+      uri: https://github.com/calvarado2004/phone-levelg.git
+      ref: main
   strategy:
     type: Docker
     dockerStrategy:
@@ -25,6 +28,21 @@ spec:
     to:
       kind: ImageStreamTag
       name: phone-levelg-server:latest
+  triggers:
+    - type: ConfigChange
+    - type: GitHub
+      github:
+        secretReference:
+          name: phone-levelg-github-webhook
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: phone-levelg-github-webhook
+  namespace: phone-levelg
+type: Opaque
+stringData:
+  WebHookSecretKey: "replace-with-private-github-webhook-secret"
 ---
 apiVersion: v1
 kind: Secret
