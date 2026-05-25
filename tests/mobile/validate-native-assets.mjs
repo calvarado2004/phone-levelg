@@ -43,6 +43,13 @@ assert.match(appTsx, /Notifications\.addPushTokenListener/, "Mobile app must ref
 assert.match(appTsx, /\/devices\/register/, "Mobile app must send device tokens to the private backend registry");
 assert.match(appTsx, /pushTokenTypeForPlatform\(devicePushToken\.type\)/, "Mobile app must identify APNs versus FCM tokens for backend dispatch");
 assert.match(appTsx, /\/devices\/\$\{encodeURIComponent\(deviceID\)\}\?userId=\$\{encodeURIComponent\(nextSession\.userId\)\}/, "Logout must unregister the current device from the backend");
+assert.match(appTsx, /STORED_PENDING_CALL_KEY = "phone-levelg\.pendingCall\.v1"/, "Mobile app must persist pending call metadata for native action handling");
+assert.match(appTsx, /handledCallIDsRef = useRef<Set<string>>\(new Set\(\)\)/, "Mobile app must deduplicate websocket and native-push rings by call id");
+assert.match(appTsx, /Notifications\.addNotificationReceivedListener/, "Mobile app must handle call metadata delivered by native notifications");
+assert.match(appTsx, /Notifications\.addNotificationResponseReceivedListener/, "Mobile app must handle call metadata when a native notification is opened");
+assert.match(appTsx, /normalizeIncomingCallPayload/, "Mobile app must normalize websocket and native-push call payloads through one path");
+assert.match(appTsx, /isExpiredCall\(payload\.expiresAt\)/, "Mobile app must ignore expired native call pushes");
+assert.match(appTsx, /callMatchesPayload\(incomingCallRef\.current, payload\.data\)/, "Remote call end/reject must match by call id when present");
 assert.match(appTsx, /accessibilityLabel="Log out"/, "Mobile app must expose an accessible logout button");
 assert.match(appTsx, /picture\?: string/, "Google profile photos must be read from userinfo");
 assert.match(appTsx, /avatarURL: normalizeAvatarURL\(avatarURL\)/, "Login must send the profile photo URL to the private backend");

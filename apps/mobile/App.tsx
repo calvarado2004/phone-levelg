@@ -96,6 +96,7 @@ const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
 const STORED_SESSION_KEY = "phone-levelg.session.v2";
 const STORED_DEVICE_ID_KEY = "phone-levelg.device.v1";
+const STORED_PENDING_CALL_KEY = "phone-levelg.pendingCall.v1";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
@@ -143,9 +144,21 @@ type Member = {
 
 type IncomingCall = {
   callUUID: string;
+  callId: string;
   roomId: string;
+  senderId: string;
   sender: string;
   mode: "voice" | "video";
+  expiresAt?: string;
+};
+
+type IncomingCallPayload = {
+  callId: string;
+  roomId: string;
+  senderId: string;
+  sender: string;
+  mode: "voice" | "video";
+  expiresAt?: string;
 };
 
 type CallPeer = {
@@ -156,9 +169,9 @@ type CallPeer = {
 type SocketEvent =
   | { type: "message:new"; data: Message }
   | { type: "message:clear"; data: { roomId: string; senderId: string } }
-  | { type: "call:ring"; data: { roomId: string; senderId: string; sender: string; mode?: "voice" | "video" } }
-  | { type: "call:end"; data: { roomId: string; senderId: string; sender: string } }
-  | { type: "call:reject"; data: { roomId: string; senderId: string; sender: string } }
+  | { type: "call:ring"; data: { callId?: string; roomId: string; senderId: string; sender: string; mode?: "voice" | "video"; expiresAt?: string } }
+  | { type: "call:end"; data: { callId?: string; roomId: string; senderId: string; sender: string } }
+  | { type: "call:reject"; data: { callId?: string; roomId: string; senderId: string; sender: string } }
   | { type: "member:joined"; data: Member };
 
 const QUICK_EMOJIS = ["👍", "😂", "❤️", "🔥", "🎉", "👀"];
@@ -233,6 +246,8 @@ export default function App() {
   const activeCallUUIDRef = useRef<string | null>(null);
   const incomingCallRef = useRef<IncomingCall | null>(null);
   const nativeCallsRef = useRef<Record<string, IncomingCall>>({});
+  const handledCallIDsRef = useRef<Set<string>>(new Set());
+  const incomingCallExpirationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callKeepReadyRef = useRef(false);
   const incomingCallNotificationRef = useRef<string | null>(null);
   const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
@@ -264,6 +279,20 @@ export default function App() {
     });
     return () => subscription.remove();
   }, [apiURL, session]);
+
+  useEffect(() => {
+    if (!session || E2E_MODE || !supportsNativePushRegistration()) return;
+    const receivedSubscription = Notifications.addNotificationReceivedListener(notification => {
+      void showIncomingCallFromPayload(notification.request.content.data, "native-push");
+    });
+    const responseSubscription = Notifications.addNotificationResponseReceivedListener(response => {
+      void showIncomingCallFromPayload(response.notification.request.content.data, "native-push");
+    });
+    return () => {
+      receivedSubscription.remove();
+      responseSubscription.remove();
+    };
+  }, [session]);
 
   useEffect(() => {
     const nativeCallKeep = getNativeCallKeep();
@@ -346,13 +375,89 @@ export default function App() {
     }
   }
 
+  async function showIncomingCallFromPayload(data: unknown, source: "websocket" | "native-push") {
+    if (!session) return;
+    const payload = normalizeIncomingCallPayload(data);
+    if (!payload || payload.senderId === session.userId || isExpiredCall(payload.expiresAt)) return;
+    if (handledCallIDsRef.current.has(payload.callId) || incomingCallRef.current?.callId === payload.callId || activeCallRoomIDRef.current === payload.roomId) {
+      return;
+    }
+
+    handledCallIDsRef.current.add(payload.callId);
+    const nextCall: IncomingCall = {
+      callUUID: createCallUUID(),
+      callId: payload.callId,
+      roomId: payload.roomId,
+      senderId: payload.senderId,
+      sender: payload.sender,
+      mode: payload.mode,
+      expiresAt: payload.expiresAt
+    };
+    nativeCallsRef.current[nextCall.callUUID] = nextCall;
+    setCallPeer({ displayName: nextCall.sender });
+    setIncomingCall(nextCall);
+    await AsyncStorage.setItem(STORED_PENDING_CALL_KEY, JSON.stringify(nextCall)).catch(() => undefined);
+    scheduleIncomingCallExpiration(nextCall);
+    void displayNativeIncomingCall(nextCall);
+    void startIncomingCallTone();
+
+    if (source === "native-push") {
+      void refreshMembers();
+    }
+  }
+
+  async function restorePendingIncomingCall(nextSession: Session) {
+    const stored = await AsyncStorage.getItem(STORED_PENDING_CALL_KEY).catch(() => null);
+    if (!stored) return;
+    try {
+      const call = JSON.parse(stored) as IncomingCall;
+      if (!call.callId || !call.roomId || !call.sender || call.senderId === nextSession.userId || isExpiredCall(call.expiresAt)) {
+        await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
+        return;
+      }
+      if (handledCallIDsRef.current.has(call.callId)) return;
+      const nextCall = { ...call, callUUID: createCallUUID() };
+      handledCallIDsRef.current.add(nextCall.callId);
+      nativeCallsRef.current[nextCall.callUUID] = nextCall;
+      setCallPeer({ displayName: nextCall.sender });
+      setIncomingCall(nextCall);
+      scheduleIncomingCallExpiration(nextCall);
+      void displayNativeIncomingCall(nextCall);
+      void startIncomingCallTone();
+    } catch {
+      await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
+    }
+  }
+
+  function scheduleIncomingCallExpiration(call: IncomingCall) {
+    clearIncomingCallExpirationTimer();
+    const expirationTime = call.expiresAt ? Date.parse(call.expiresAt) : Number.NaN;
+    if (!Number.isFinite(expirationTime)) return;
+
+    const delay = Math.max(0, expirationTime - Date.now());
+    incomingCallExpirationTimerRef.current = setTimeout(() => {
+      if (incomingCallRef.current?.callId === call.callId) {
+        void declineIncomingCall({ announce: false });
+      }
+    }, delay);
+  }
+
+  function clearIncomingCallExpirationTimer() {
+    if (incomingCallExpirationTimerRef.current) {
+      clearTimeout(incomingCallExpirationTimerRef.current);
+      incomingCallExpirationTimerRef.current = null;
+    }
+  }
+
   async function acceptNativeIncomingCall(callUUID: string) {
     const call = nativeCallsRef.current[callUUID] ?? incomingCallRef.current;
     if (!call) return;
 
     activeCallUUIDRef.current = callUUID;
+    clearIncomingCallExpirationTimer();
     setIncomingCall(null);
     incomingCallRef.current = null;
+    await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     await joinCall(call.mode, call.roomId, false);
     getNativeCallKeep()?.setCurrentCallActive?.(callUUID);
   }
@@ -389,6 +494,7 @@ export default function App() {
       setAvatarURL(payload.session.avatarURL ?? "");
       setSession(payload.session);
       void registerDeviceForPush(payload.session, normalizeServerURL(payload.serverURL || DEFAULT_API_URL));
+      void restorePendingIncomingCall(payload.session);
     } catch {
       await AsyncStorage.removeItem(STORED_SESSION_KEY).catch(() => undefined);
     }
@@ -522,17 +628,10 @@ export default function App() {
         }
       }
       if (payload.type === "call:ring" && payload.data.senderId !== session.userId) {
-        const ringMode = payload.data.mode === "video" ? "video" : "voice";
-        const callUUID = createCallUUID();
-        const nextCall: IncomingCall = { callUUID, roomId: payload.data.roomId, sender: payload.data.sender, mode: ringMode };
-        nativeCallsRef.current[callUUID] = nextCall;
-        setCallPeer({ displayName: payload.data.sender });
-        setIncomingCall(nextCall);
-        void displayNativeIncomingCall(nextCall);
-        void startIncomingCallTone();
+        void showIncomingCallFromPayload(payload.data, "websocket");
       }
       if (payload.type === "call:end" && payload.data.senderId !== session.userId) {
-        if (incomingCallRef.current?.roomId === payload.data.roomId) {
+        if (incomingCallRef.current && callMatchesPayload(incomingCallRef.current, payload.data)) {
           void declineIncomingCall({ announce: false });
         }
         if (activeCallRoomIDRef.current === payload.data.roomId) {
@@ -540,7 +639,7 @@ export default function App() {
         }
       }
       if (payload.type === "call:reject" && payload.data.senderId !== session.userId) {
-        if (incomingCallRef.current?.roomId === payload.data.roomId) {
+        if (incomingCallRef.current && callMatchesPayload(incomingCallRef.current, payload.data)) {
           void declineIncomingCall({ announce: false });
         }
         if (activeCallRoomIDRef.current === payload.data.roomId) {
@@ -887,7 +986,9 @@ export default function App() {
     if (call) {
       delete nativeCallsRef.current[call.callUUID];
     }
+    clearIncomingCallExpirationTimer();
     await stopIncomingCallTone();
+    await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     setIncomingCall(null);
     incomingCallRef.current = null;
     setCallPeer(null);
@@ -898,7 +999,9 @@ export default function App() {
     const nextCall = incomingCall;
     activeCallUUIDRef.current = nextCall.callUUID;
     setCallPeer({ displayName: nextCall.sender });
+    clearIncomingCallExpirationTimer();
     setIncomingCall(null);
+    await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     await joinCall(nextCall.mode, nextCall.roomId, false);
     getNativeCallKeep()?.setCurrentCallActive?.(nextCall.callUUID);
   }
@@ -1556,6 +1659,29 @@ function callParticipantLabel(mode: "voice" | "video", remoteParticipantCount: n
 
 function directRoomID(firstID: string, secondID: string) {
   return `dm:${[firstID, secondID].sort().join(":")}`;
+}
+
+function normalizeIncomingCallPayload(data: unknown): IncomingCallPayload | null {
+  if (!data || typeof data !== "object") return null;
+  const payload = data as Record<string, unknown>;
+  const roomId = typeof payload.roomId === "string" ? payload.roomId.trim() : "";
+  const senderId = typeof payload.senderId === "string" ? payload.senderId.trim() : "";
+  const sender = typeof payload.sender === "string" ? payload.sender.trim() : "";
+  const callId = typeof payload.callId === "string" && payload.callId.trim() ? payload.callId.trim() : `${roomId}:${senderId}`;
+  const mode = payload.mode === "video" ? "video" : "voice";
+  const expiresAt = typeof payload.expiresAt === "string" ? payload.expiresAt : undefined;
+  if (!roomId || !senderId || !sender) return null;
+  return { callId, roomId, senderId, sender, mode, expiresAt };
+}
+
+function isExpiredCall(expiresAt?: string) {
+  if (!expiresAt) return false;
+  const expirationTime = Date.parse(expiresAt);
+  return Number.isFinite(expirationTime) && expirationTime <= Date.now();
+}
+
+function callMatchesPayload(call: IncomingCall, payload: { callId?: string; roomId: string }) {
+  return Boolean(payload.callId && payload.callId === call.callId) || payload.roomId === call.roomId;
 }
 
 function createCallUUID() {

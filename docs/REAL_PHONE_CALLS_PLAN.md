@@ -99,9 +99,9 @@ sequenceDiagram
 - [x] Register APNs/FCM-style native push token after login restore and successful login.
 - [x] Re-register device when the native push token rotates.
 - [x] Best-effort unregister current device on logout.
-- [ ] Deduplicate foreground WebSocket ring and native push ring for the same `callId`.
-- [ ] Persist pending incoming call metadata long enough for native action handling.
-- [ ] Ensure expired pushes do not show call UI.
+- [x] Deduplicate foreground WebSocket ring and native push ring for the same `callId`.
+- [x] Persist pending incoming call metadata long enough for native action handling.
+- [x] Ensure expired pushes do not show call UI.
 - [ ] Ensure caller sees `Call rejected`, `Call ended`, or `Unavailable`.
 - [ ] Keep local and remote video behavior unchanged after push-based entry.
 
@@ -114,6 +114,7 @@ sequenceDiagram
 - [x] Add native project validation for mobile push-token registration wiring.
 - [x] Add backend tests for missing APNs/FCM credentials graceful behavior.
 - [x] Add backend tests for APNs/FCM call payload shaping.
+- [x] Add native project validation for mobile call-id dedupe, pending call persistence, and expired push handling.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
