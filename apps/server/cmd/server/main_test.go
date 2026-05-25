@@ -6,10 +6,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -146,6 +148,71 @@ func TestBuildPushDispatcherEnablesConfiguredProviders(t *testing.T) {
 	}
 	if composite.apns == nil || composite.fcm == nil {
 		t.Fatalf("expected both providers to be enabled: %#v", composite)
+	}
+}
+
+func TestBuildPushDispatcherEnablesFCMServiceAccount(t *testing.T) {
+	dispatcher := buildPushDispatcher(config{
+		fcmServiceAccount: testGoogleServiceAccountJSON(t, "phone-levelg", "https://oauth2.example/token"),
+	})
+	composite, ok := dispatcher.(compositePushDispatcher)
+	if !ok {
+		t.Fatalf("expected composite dispatcher, got %T", dispatcher)
+	}
+	if composite.fcm == nil {
+		t.Fatalf("expected fcm provider to be enabled: %#v", composite)
+	}
+	if composite.fcm.projectID != "phone-levelg" {
+		t.Fatalf("expected project id from service account, got %q", composite.fcm.projectID)
+	}
+	if composite.fcm.endpoint != "https://fcm.googleapis.com/v1/projects/phone-levelg/messages:send" {
+		t.Fatalf("unexpected fcm endpoint: %q", composite.fcm.endpoint)
+	}
+}
+
+func TestFCMServiceAccountMintsAndCachesAccessToken(t *testing.T) {
+	accountJSON := testGoogleServiceAccountJSON(t, "phone-levelg", "")
+	account, err := parseGoogleServiceAccount(accountJSON)
+	if err != nil {
+		t.Fatalf("parse service account: %v", err)
+	}
+	tokenRequests := 0
+	account.TokenURI = "https://oauth2.example/token"
+	provider := &fcmProvider{
+		serviceAccount: account,
+		client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			tokenRequests++
+			if r.Method != http.MethodPost {
+				t.Fatalf("expected post, got %s", r.Method)
+			}
+			if err := r.ParseForm(); err != nil {
+				t.Fatalf("parse token form: %v", err)
+			}
+			if r.Form.Get("grant_type") != "urn:ietf:params:oauth:grant-type:jwt-bearer" || r.Form.Get("assertion") == "" {
+				t.Fatalf("unexpected token request form: %v", r.Form)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Header:     http.Header{"content-type": []string{"application/json"}},
+				Body:       io.NopCloser(strings.NewReader(`{"access_token":"oauth-token","expires_in":3600}`)),
+			}, nil
+		})},
+	}
+
+	firstToken, err := provider.bearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("first bearer token: %v", err)
+	}
+	secondToken, err := provider.bearerToken(context.Background())
+	if err != nil {
+		t.Fatalf("second bearer token: %v", err)
+	}
+	if firstToken != "oauth-token" || secondToken != "oauth-token" {
+		t.Fatalf("unexpected tokens: %q %q", firstToken, secondToken)
+	}
+	if tokenRequests != 1 {
+		t.Fatalf("expected cached token after one request, got %d requests", tokenRequests)
 	}
 }
 
@@ -472,9 +539,15 @@ func TestIntegrationMembersLobby(t *testing.T) {
 	}
 
 	userID := randomID()
-	_, err = db.Exec(ctx, `insert into users (id, display_name) values ($1, $2)`, userID, "Lobby User")
+	_, err = db.Exec(ctx, `insert into users (id, display_name, last_seen_at) values ($1, $2, now() - interval '45 days')`, userID, "Lobby User")
 	if err != nil {
 		t.Fatalf("insert user: %v", err)
+	}
+	_, err = db.Exec(ctx, `
+insert into devices (device_id, user_id, platform, push_token, push_token_type, last_seen_at)
+values ('iphone', $1, 'ios', 'voip-token', 'apns-voip', now())`, userID)
+	if err != nil {
+		t.Fatalf("insert device: %v", err)
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/members", nil)
@@ -496,6 +569,12 @@ func TestIntegrationMembersLobby(t *testing.T) {
 	}
 	if payload.Members[0].DisplayName == "" {
 		t.Fatal("expected member display name")
+	}
+	if !payload.Members[0].Reachable {
+		t.Fatal("expected device-backed member reachability")
+	}
+	if !payload.Members[0].LastReachableAt.After(payload.Members[0].LastSeenAt) {
+		t.Fatal("expected lastReachableAt to include recent device registration")
 	}
 }
 
@@ -1039,6 +1118,12 @@ type recordingPushDispatcher struct {
 	calls []recordedPushCall
 }
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
+}
+
 func (r *recordingPushDispatcher) DispatchCallPush(_ context.Context, payload callPushPayload, devices []pushDevice) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1080,4 +1165,28 @@ func testAPNSPrivateKeyPEM(t *testing.T) string {
 		t.Fatalf("marshal ecdsa key: %v", err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey}))
+}
+
+func testGoogleServiceAccountJSON(t *testing.T, projectID, tokenURI string) string {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("generate rsa key: %v", err)
+	}
+	encodedKey, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal rsa key: %v", err)
+	}
+	privateKey := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey}))
+	payload, err := json.Marshal(map[string]string{
+		"type":         "service_account",
+		"project_id":   projectID,
+		"client_email": "firebase-adminsdk@example.iam.gserviceaccount.com",
+		"private_key":  privateKey,
+		"token_uri":    tokenURI,
+	})
+	if err != nil {
+		t.Fatalf("marshal service account json: %v", err)
+	}
+	return string(payload)
 }

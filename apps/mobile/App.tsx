@@ -2,7 +2,7 @@ import "react-native-get-random-values";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import * as AuthSession from "expo-auth-session";
-import { setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
+import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
 import * as Notifications from "expo-notifications";
 import * as WebBrowser from "expo-web-browser";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
@@ -31,9 +31,13 @@ import { LogLevel, Room, RoomEvent, isVideoTrack, setLogLevel, type VideoTrack a
 import {
   Phone,
   PhoneOff,
+  Bell,
+  Camera,
   LogOut,
+  Mic,
   SendHorizontal,
   Mail,
+  Settings,
   Smile,
   SwitchCamera,
   Trash2,
@@ -146,6 +150,8 @@ type Member = {
   avatarURL?: string;
   createdAt?: string;
   lastSeenAt: string;
+  lastReachableAt?: string;
+  reachable?: boolean;
 };
 
 type IncomingCall = {
@@ -182,6 +188,8 @@ type CallPeer = {
   displayName: string;
   avatarURL?: string;
 };
+
+type PermissionState = "unknown" | "granted" | "denied";
 
 type SocketEvent =
   | { type: "message:new"; data: Message }
@@ -265,6 +273,9 @@ export default function App() {
   const [localVideoTrack, setLocalVideoTrack] = useState<LiveKitVideoTrack | undefined>();
   const [remoteVideoTrack, setRemoteVideoTrack] = useState<LiveKitVideoTrack | undefined>();
   const [cameraDeviceID, setCameraDeviceID] = useState<string | undefined>();
+  const [iosCallAlertPermission, setIOSCallAlertPermission] = useState<PermissionState>("unknown");
+  const [iosMicPermission, setIOSMicPermission] = useState<PermissionState>("unknown");
+  const [iosCameraPermission, setIOSCameraPermission] = useState<PermissionState>("unknown");
   const socketRef = useRef<WebSocket | null>(null);
   const roomRef = useRef<Room | null>(null);
   const activeCallRoomIDRef = useRef<string | null>(null);
@@ -290,6 +301,8 @@ export default function App() {
   const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
   const callPeerName = callPeer?.displayName ?? activeRoomTitle;
   const isFullScreenCall = callActive;
+  const selfReachable = session ? members.find(member => member.id === session.userId)?.reachable !== false : false;
+  const connectionStatus = connected ? callStatus : selfReachable ? "Ready" : "Offline";
 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
@@ -336,6 +349,11 @@ export default function App() {
     });
     return () => subscription.remove();
   }, [apiURL, session]);
+
+  useEffect(() => {
+    if (!session || Platform.OS !== "ios" || E2E_MODE) return;
+    void refreshIOSCallPermissions();
+  }, [session]);
 
   useEffect(() => {
     if (!session || Platform.OS !== "ios" || E2E_MODE || !nativeVoIPTokenModule) return;
@@ -428,6 +446,64 @@ export default function App() {
     } catch {
       callKeepReadyRef.current = false;
     }
+  }
+
+  async function refreshIOSCallPermissions() {
+    if (Platform.OS !== "ios") return;
+
+    const notificationPermission = await Notifications.getPermissionsAsync().catch(() => null);
+    if (notificationPermission) {
+      setIOSCallAlertPermission(notificationPermission.granted ? "granted" : notificationPermission.canAskAgain === false ? "denied" : "unknown");
+    }
+
+    const micPermission = await getRecordingPermissionsAsync().catch(() => null);
+    if (micPermission) {
+      setIOSMicPermission(micPermission.granted ? "granted" : micPermission.canAskAgain === false ? "denied" : "unknown");
+    }
+  }
+
+  async function requestIPhoneCallAlertPermission() {
+    if (Platform.OS !== "ios") return;
+    const permission = await Notifications.requestPermissionsAsync({
+      ios: {
+        allowAlert: true,
+        allowSound: true,
+        allowBadge: true
+      }
+    });
+    setIOSCallAlertPermission(permission.granted ? "granted" : "denied");
+    if (!permission.granted && permission.canAskAgain === false) {
+      await Linking.openSettings().catch(() => undefined);
+    }
+    if (session) {
+      void registerDeviceForPush(session, apiURL);
+    }
+  }
+
+  async function requestIPhoneMicPermission() {
+    if (Platform.OS !== "ios") return;
+    const permission = await requestRecordingPermissionsAsync();
+    setIOSMicPermission(permission.granted ? "granted" : "denied");
+    if (!permission.granted && permission.canAskAgain === false) {
+      await Linking.openSettings().catch(() => undefined);
+    }
+  }
+
+  async function requestIPhoneCameraPermission() {
+    if (Platform.OS !== "ios") return;
+    const granted = await requestIOSCameraPermission();
+    setIOSCameraPermission(granted ? "granted" : "denied");
+    if (!granted) {
+      await Linking.openSettings().catch(() => undefined);
+    }
+  }
+
+  async function requestIPhoneCallPermissions() {
+    if (Platform.OS !== "ios") return;
+    await requestIPhoneCallAlertPermission();
+    await requestIPhoneMicPermission();
+    await requestIPhoneCameraPermission();
+    await refreshIOSCallPermissions();
   }
 
   async function displayNativeIncomingCall(call: IncomingCall) {
@@ -1525,7 +1601,7 @@ export default function App() {
             </View>
             <View>
               <Text style={styles.roomTitle} numberOfLines={1}>{headerTitle}</Text>
-              <Text style={styles.status}>{connected ? callStatus : "Offline"}</Text>
+              <Text style={styles.status}>{connectionStatus}</Text>
             </View>
           </View>
           <View style={styles.headerActions}>
@@ -1561,6 +1637,38 @@ export default function App() {
             </Pressable>
           </View>
         </View>
+
+        {Platform.OS === "ios" && (
+          <View style={styles.permissionStrip}>
+            <PermissionToggle
+              icon={Bell}
+              label="Call alerts"
+              state={iosCallAlertPermission}
+              onPress={() => void requestIPhoneCallAlertPermission()}
+            />
+            <PermissionToggle
+              icon={Mic}
+              label="Mic"
+              state={iosMicPermission}
+              onPress={() => void requestIPhoneMicPermission()}
+            />
+            <PermissionToggle
+              icon={Camera}
+              label="Camera"
+              state={iosCameraPermission}
+              onPress={() => void requestIPhoneCameraPermission()}
+            />
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Enable iPhone call permissions"
+              hitSlop={10}
+              style={styles.permissionSettingsButton}
+              onPress={() => void requestIPhoneCallPermissions()}
+            >
+              <Settings color="#f8fafc" size={17} />
+            </Pressable>
+          </View>
+        )}
 
         {incomingCall && (
           <View style={styles.incomingCallOverlay}>
@@ -1716,6 +1824,28 @@ export default function App() {
   );
 }
 
+function PermissionToggle({ icon: Icon, label, state, onPress }: { icon: ComponentType<{ color?: string; size?: number }>; label: string; state: PermissionState; onPress: () => void }) {
+  const enabled = state === "granted";
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityState={{ checked: enabled }}
+      accessibilityLabel={`${label} permission`}
+      hitSlop={8}
+      style={[styles.permissionToggle, enabled && styles.permissionToggleOn, state === "denied" && styles.permissionToggleDenied]}
+      onPress={onPress}
+    >
+      <Icon color={enabled ? "#062a1a" : "#f8fafc"} size={15} />
+      <Text style={[styles.permissionToggleText, enabled && styles.permissionToggleTextOn]} numberOfLines={1}>
+        {label}
+      </Text>
+      <Text style={[styles.permissionStateText, enabled && styles.permissionStateTextOn]} numberOfLines={1}>
+        {enabled ? "On" : "Enable"}
+      </Text>
+    </Pressable>
+  );
+}
+
 function CameraStreamView({ track, mirror, zOrder }: { track: LiveKitVideoTrack; mirror?: boolean; zOrder?: number }) {
   const [streamURL, setStreamURL] = useState("");
 
@@ -1810,7 +1940,9 @@ function membersEqual(left: Member[], right: Member[]) {
       member.displayName === other.displayName &&
       member.avatarURL === other.avatarURL &&
       member.createdAt === other.createdAt &&
-      member.lastSeenAt === other.lastSeenAt;
+      member.lastSeenAt === other.lastSeenAt &&
+      member.lastReachableAt === other.lastReachableAt &&
+      member.reachable === other.reachable;
   });
 }
 
@@ -1943,10 +2075,6 @@ async function registerDeviceForPush(nextSession: Session, apiURL: string) {
   await registerVoIPDeviceForPush(nextSession, apiURL).catch(() => undefined);
 
   try {
-    const currentPermissions = await Notifications.getPermissionsAsync();
-    const nextPermissions = currentPermissions.granted ? currentPermissions : await Notifications.requestPermissionsAsync();
-    if (!nextPermissions.granted) return;
-
     const devicePushToken = await Notifications.getDevicePushTokenAsync();
     const pushToken = serializePushTokenData(devicePushToken.data);
     if (!pushToken) return;
@@ -1963,8 +2091,17 @@ async function registerDeviceForPush(nextSession: Session, apiURL: string) {
         appVersion: "0.1.0"
       })
     });
+
+    await requestIncomingCallNotificationPermission();
   } catch {
     // Push registration is retried after login restore and token rotation.
+  }
+}
+
+async function requestIncomingCallNotificationPermission() {
+  const currentPermissions = await Notifications.getPermissionsAsync();
+  if (!currentPermissions.granted) {
+    await Notifications.requestPermissionsAsync();
   }
 }
 
@@ -2019,6 +2156,17 @@ function normalizeServerURL(value: string) {
 }
 
 async function requestCallPermissions(mode: "voice" | "video") {
+  if (Platform.OS === "ios") {
+    const micPermission = await requestRecordingPermissionsAsync();
+    if (!micPermission.granted) {
+      return false;
+    }
+    if (mode === "video") {
+      return requestIOSCameraPermission();
+    }
+    return true;
+  }
+
   if (Platform.OS !== "android") {
     return true;
   }
@@ -2031,6 +2179,29 @@ async function requestCallPermissions(mode: "voice" | "video") {
   const results = await PermissionsAndroid.requestMultiple(permissions);
 
   return Object.values(results).every(result => result === PermissionsAndroid.RESULTS.GRANTED);
+}
+
+async function requestIOSCameraPermission() {
+  const mediaDevices = (globalThis as unknown as {
+    navigator?: {
+      mediaDevices?: {
+        getUserMedia?: (constraints: { video: boolean; audio: boolean }) => Promise<{ getTracks?: () => Array<{ stop?: () => void }> }>;
+      };
+    };
+  }).navigator?.mediaDevices;
+  if (!mediaDevices?.getUserMedia) {
+    return false;
+  }
+
+  let stream: { getTracks?: () => Array<{ stop?: () => void }> } | undefined;
+  try {
+    stream = await mediaDevices.getUserMedia({ video: true, audio: false });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    stream?.getTracks?.().forEach(track => track.stop?.());
+  }
 }
 
 const styles = StyleSheet.create({
@@ -2338,6 +2509,64 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: "#24123d",
+    borderWidth: 1,
+    borderColor: "#6d46a3"
+  },
+  permissionStrip: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    backgroundColor: "#140a24",
+    borderBottomWidth: 1,
+    borderBottomColor: "#2f1b4b"
+  },
+  permissionToggle: {
+    flex: 1,
+    minWidth: 0,
+    minHeight: 38,
+    borderRadius: 10,
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 5,
+    paddingHorizontal: 8,
+    backgroundColor: "#24123d",
+    borderWidth: 1,
+    borderColor: "#4c2c73"
+  },
+  permissionToggleOn: {
+    backgroundColor: "#33c179",
+    borderColor: "#33c179"
+  },
+  permissionToggleDenied: {
+    borderColor: "#dc2626"
+  },
+  permissionToggleText: {
+    flexShrink: 1,
+    color: "#f8fafc",
+    fontSize: 12,
+    fontWeight: "800"
+  },
+  permissionToggleTextOn: {
+    color: "#062a1a"
+  },
+  permissionStateText: {
+    color: "#b7c1cc",
+    fontSize: 11,
+    fontWeight: "800"
+  },
+  permissionStateTextOn: {
+    color: "#062a1a"
+  },
+  permissionSettingsButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#3c245f",
     borderWidth: 1,
     borderColor: "#6d46a3"
   },

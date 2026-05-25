@@ -45,6 +45,7 @@ stringData:
   APNS_ENDPOINT: "https://api.push.apple.com"
   FCM_PROJECT_ID: ""
   FCM_ACCESS_TOKEN: ""
+  FCM_SERVICE_ACCOUNT_JSON: ""
   FCM_ENDPOINT: ""
 ---
 apiVersion: apps/v1

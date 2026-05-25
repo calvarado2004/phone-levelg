@@ -56,43 +56,62 @@ MongoDB is not deployed. The MVP does not need a document database, and keeping 
 ```mermaid
 flowchart LR
   subgraph Clients["Native clients"]
-    Android["Android app\nReact Native + Expo\nRelease APK"]
-    IOS["iOS app\nReact Native + Expo\nRelease app"]
+    Android["Android app\nReact Native + Expo\nFCM + full-screen call activity\nrockstar ringtone"]
+    IOS["iOS app\nReact Native + Expo\nPushKit + CallKit\ncall alert, mic, camera toggles"]
   end
 
   subgraph Backend["Private backend"]
     API["Go 1.26 API\nchi router"]
-    PG["Postgres 18\nusers + messages"]
-    Redis["Redis 7\npub/sub fan-out"]
+    PG["Postgres 18\nusers, sticky reachable devices,\nmessages, call attempts"]
+    Redis["Redis 7\nWebSocket pub/sub fan-out\nactive-session signaling"]
     LK["LiveKit\nWebRTC SFU"]
   end
 
-  Android -->|"HTTPS\nlogin, members, messages, call tokens"| API
-  IOS -->|"HTTPS\nlogin, members, messages, call tokens"| API
-  Android -->|"WebSocket\nchat, presence, call ring/end/reject"| API
-  IOS -->|"WebSocket\nchat, presence, call ring/end/reject"| API
+  subgraph Push["Native wake-up providers"]
+    FCM["Firebase Cloud Messaging\nAndroid high-priority data push"]
+    APNS["APNs VoIP Push\nPushKit token delivery"]
+  end
+
+  Android -->|"HTTPS\nlogin, sticky members,\nmessages, call tokens,\nFCM device registration"| API
+  IOS -->|"HTTPS\nlogin, sticky members,\nmessages, call tokens,\nAPNs + VoIP device registration"| API
+  Android -->|"WebSocket\nactive chat, live call ring/end/reject"| API
+  IOS -->|"WebSocket\nactive chat, live call ring/end/reject"| API
   API -->|"SQL"| PG
   API -->|"publish / subscribe"| Redis
   API -->|"JWT minting\n/calls/token"| LK
+  API -->|"FCM v1\nservice-account OAuth"| FCM
+  API -->|"APNs HTTP/2\nprovider token + VoIP topic"| APNS
+  FCM -->|"high-priority data call:ring"| Android
+  APNS -->|"VoIP call:ring\nCallKit wake-up"| IOS
   Android -->|"WebRTC media\nvoice/video"| LK
   IOS -->|"WebRTC media\nvoice/video"| LK
 ```
 
-The backend does not carry audio or video media. It validates identity, stores messages, publishes signaling events, and issues LiveKit JWTs. Mobile clients use those tokens to connect directly to LiveKit for WebRTC media.
+The backend does not carry audio or video media. It validates identity, stores messages, registers native push tokens, publishes signaling events, keeps member reachability sticky from recent device registrations, sends native call wake-up pushes, persists call attempts for audit, and issues LiveKit JWTs. Mobile clients use those tokens to connect directly to LiveKit for WebRTC media.
 
 ```mermaid
 sequenceDiagram
   participant Caller as Android/iOS caller
   participant API as Go API
+  participant DB as Postgres device registry
+  participant Push as FCM/APNs
   participant Callee as Android/iOS callee
   participant LiveKit as LiveKit
 
+  Callee->>API: POST /devices/register with APNs/VoIP or FCM token
+  API->>DB: Upsert device and refresh sticky reachability
+  Callee->>API: GET /members
+  API-->>Callee: Members with reachable + lastReachableAt
   Caller->>API: POST /calls/token
   API-->>Caller: LiveKit room JWT
   Caller->>LiveKit: Join room and publish microphone/camera
   Caller->>API: WebSocket call:ring(roomId, mode)
-  API-->>Callee: WebSocket call:ring
-  Callee-->>Callee: Full-screen incoming-call UI + rockstar ringtone
+  API-->>Callee: WebSocket call:ring when app is active
+  API->>DB: Load registered recipient devices
+  API->>Push: Native call push to registered recipient devices
+  Push-->>Callee: Wake app/native service while backgrounded
+  Callee-->>Callee: Android full-screen activity or iOS CallKit + rockstar ringtone
+  Callee-->>Callee: iOS permission toggles gate call alerts, microphone, and camera
   Callee->>API: POST /calls/token
   API-->>Callee: LiveKit room JWT
   Callee->>LiveKit: Join same room and publish media
@@ -114,9 +133,11 @@ flowchart TB
     Route["Private OpenShift route"]
     Build["Binary BuildConfig\ninternal registry image"]
     Deploy["Go API Deployment"]
+    Secret["Server Secret\ninvite, LiveKit,\nAPNs keys, FCM service account"]
     OcpPG["Postgres StatefulSet\npx-csi-db PVC"]
     OcpRedis["Redis StatefulSet\npx-csi-db PVC"]
     OcpLiveKit["LiveKit Deployment\nLoadBalancer + host forward"]
+    PushAudit["Call attempt audit\nrecipient device delivery rows"]
   end
 
   Compose --> LocalAPI
@@ -125,9 +146,12 @@ flowchart TB
   Compose --> LocalLiveKit
   Route --> Deploy
   Build --> Deploy
+  Secret --> Deploy
   Deploy --> OcpPG
   Deploy --> OcpRedis
   Deploy --> OcpLiveKit
+  Deploy --> PushAudit
+  PushAudit --> OcpPG
 ```
 
 ### Implementation Details
@@ -136,13 +160,13 @@ flowchart TB
 | --- | --- | --- |
 | Mobile UI | React Native, Expo, TypeScript | The main app surface is in `apps/mobile/App.tsx`. It handles login, lobby presence, direct chats, message rendering, call controls, incoming-call overlays, and full-screen voice/video call layouts. |
 | Native shells | Android Gradle project, iOS Xcode project | Native projects live under `apps/mobile/android` and `apps/mobile/ios`. Release builds are used for emulator, simulator, and device validation. |
-| Calling UI | LiveKit React Native, WebRTC, Expo notifications | Calls use a phone-style full-screen surface. Video calls show the remote video, the contact icon/name header, `Calling <contact-name>`, and a bottom-right local camera preview. Incoming calls use the bundled `rockstar.mp3` ringtone. |
+| Calling UI | LiveKit React Native, WebRTC, Android full-screen notifications, iOS CallKit | Calls use a phone-style full-screen surface. Video calls show the remote video, the contact icon/name header, `Calling <contact-name>`, and a bottom-right local camera preview. Incoming calls use the bundled `rockstar.mp3` ringtone. |
 | Identity | Google email plus invite code | The backend keys accounts by normalized `accountEmail`. Display names are presentation-only and can overlap across users. |
-| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores messages, enforces direct-room access, maintains websocket sessions, and mints LiveKit tokens. |
+| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores messages, enforces direct-room access, maintains websocket sessions, registers devices, sends APNs/FCM call pushes, and mints LiveKit tokens. |
 | Durable state | Postgres 18 | Users and messages are stored in Postgres. OpenShift uses a `px-csi-db` PVC with `PGDATA` below the mounted PVC root. |
 | Live events | Redis 7 | Redis pub/sub fans out chat, presence, direct-room deletion, and call signaling events across backend instances. |
 | Media | LiveKit | LiveKit carries the actual voice/video media. Local Docker and OpenShift configs advertise a reachable node IP and mapped WebRTC ports so clients do not try to connect to container or pod IPs. |
-| Deployment | Docker Compose, OpenShift, internal registry | Docker Compose runs local state and LiveKit. OpenShift manifests create the namespace, stateful services, backend build/deploy resources, routes, and LiveKit networking. |
+| Deployment | Docker Compose, OpenShift, internal registry | Docker Compose runs local state and LiveKit. OpenShift manifests create the namespace, stateful services, backend build/deploy resources, routes, APNs/FCM secret keys, and LiveKit networking. |
 | Validation | Go tests, TypeScript, native asset checks, Playwright | Tests cover backend behavior, deployment assumptions, native project assets, mobile build assumptions, and screen rendering. |
 
 ## Runtime Components
@@ -170,6 +194,8 @@ It provides:
 - phone-style full-screen voice/video calls
 - contact icon and `Calling <contact-name>` header during calls
 - bottom-right self camera preview during video calls
+- Android FCM call pushes through a native Firebase Messaging service
+- iOS PushKit/CallKit call pushes once Apple provisioning is active
 - native Android and iOS projects for IDE/device builds
 
 Important environment variables:
@@ -228,6 +254,10 @@ Always install release builds on Android emulators, Android devices, iOS simulat
 ### iOS Push Provisioning
 
 Real iPhone background call delivery requires Apple Push Notification service entitlement support. Use a paid Apple Developer Program team, create or update the explicit App ID `io.levelg.phone`, enable Push Notifications, then regenerate the development or distribution provisioning profile so it includes the `aps-environment` entitlement. Personal/free development teams cannot create the required Push Notifications profile, so Release device builds with PushKit enabled will fail signing until this is done.
+
+### Android Push Provisioning
+
+Real Android background call delivery requires Firebase Cloud Messaging. Add the Firebase Android app config file at `apps/mobile/android/app/google-services.json` for package `io.levelg.phone`, then rebuild and install the release APK. Configure the OpenShift server secret with `FCM_SERVICE_ACCOUNT_JSON` from a Firebase service account that can send FCM v1 messages. Without both pieces, calls only reach Android while the app is already open over WebSocket.
 
 ### Go Backend
 
@@ -288,7 +318,7 @@ The OpenShift service receives a MetalLB IP from the libvirt network. The host r
 
 The app/backend integration point is already present: the backend issues LiveKit JWTs from `/calls/token`.
 
-The app keeps calls in the foreground app experience. Native full-screen incoming calls while the app is suspended still require production push infrastructure: APNs/PushKit plus CallKit on iOS, and FCM plus high-priority notifications or ConnectionService on Android.
+Native full-screen incoming-call plumbing is implemented through APNs/PushKit/CallKit on iOS and FCM high-priority data messages plus an Android full-screen call activity. Android still requires real Firebase configuration and OpenShift FCM credentials before background calls can work. iOS device release deployment is pending Apple Developer Program activation and Push Notifications provisioning for `io.levelg.phone`.
 
 ## Local Development
 

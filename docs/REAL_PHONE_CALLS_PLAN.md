@@ -67,9 +67,12 @@ sequenceDiagram
 
 - [x] Add APNs provider configuration to backend.
 - [x] Add FCM provider configuration to backend.
+- [x] Add Firebase service-account JSON support so OpenShift can mint FCM OAuth tokens automatically.
 - [x] Add OpenShift secret keys for APNs and FCM without committing real credentials.
 - [x] Add deployment manifest/env wiring for APNs and FCM.
 - [x] Ensure missing push credentials fail gracefully in local development.
+- [ ] Add real `FCM_SERVICE_ACCOUNT_JSON` to the OpenShift `phone-levelg-server` secret.
+- [ ] Add the real Firebase `google-services.json` to `apps/mobile/android/app/` before release builds.
 - [ ] Enroll/use a paid Apple Developer Program team for `io.levelg.phone`.
 - [ ] Enable Push Notifications for the explicit `io.levelg.phone` App ID.
 - [ ] Regenerate/download an iOS development or distribution provisioning profile that contains `aps-environment`.
@@ -89,6 +92,8 @@ sequenceDiagram
 
 - [x] Add first-pass FCM registration through Expo native device push tokens.
 - [x] Send FCM token to `/devices/register`.
+- [x] Do not block FCM device-token registration behind Android notification permission.
+- [x] Apply the Google Services Gradle plugin automatically when `google-services.json` exists.
 - [x] Send Android call pushes as high-priority FCM data messages.
 - [x] Handle high-priority data message in background/killed states.
 - [x] Add native full-screen incoming-call activity and notification builder.

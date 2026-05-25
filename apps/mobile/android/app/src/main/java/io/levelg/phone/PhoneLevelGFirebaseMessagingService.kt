@@ -22,7 +22,9 @@ class PhoneLevelGFirebaseMessagingService : ExpoFirebaseMessagingService() {
     if (data[AndroidCallNotifications.EXTRA_ROOM_ID].isNullOrBlank()) return false
     if (isExpired(data[AndroidCallNotifications.EXTRA_EXPIRES_AT])) return true
 
-    AndroidCallNotifications.showIncomingCall(applicationContext, callExtras(data))
+    val extras = callExtras(data)
+    AndroidCallNotifications.showIncomingCall(applicationContext, extras)
+    AndroidCallNotifications.openIncomingCallActivity(applicationContext, extras)
     return true
   }
 

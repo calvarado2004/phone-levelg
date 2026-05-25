@@ -1,7 +1,11 @@
 package io.levelg.phone
 
+import android.app.NotificationManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
@@ -17,6 +21,21 @@ class MainActivity : ReactActivity() {
     // This is required for expo-splash-screen.
     setTheme(R.style.AppTheme);
     super.onCreate(null)
+    promptForFullScreenCallPermission()
+  }
+
+  private fun promptForFullScreenCallPermission() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return
+    val notificationManager = getSystemService(NotificationManager::class.java)
+    if (notificationManager.canUseFullScreenIntent()) return
+
+    val prefs = getSharedPreferences("phone-levelg", MODE_PRIVATE)
+    if (prefs.getBoolean("fullScreenCallPermissionPrompted", false)) return
+    prefs.edit().putBoolean("fullScreenCallPermissionPrompted", true).apply()
+
+    startActivity(Intent(Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT).apply {
+      data = Uri.parse("package:$packageName")
+    })
   }
 
   /**

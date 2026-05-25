@@ -126,11 +126,9 @@ extension AppDelegate: PKPushRegistryDelegate {
 private extension AppDelegate {
   func setupNativeCallProvider() {
     RNCallKeep.setup([
-      "ios": [
-        "appName": "Phone LevelG",
-        "supportsVideo": true,
-        "includesCallsInRecents": false
-      ]
+      "appName": "Phone LevelG",
+      "supportsVideo": true,
+      "includesCallsInRecents": false
     ])
   }
 

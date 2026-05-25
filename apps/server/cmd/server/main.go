@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/base64"
@@ -18,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -29,21 +32,22 @@ import (
 )
 
 type config struct {
-	port             string
-	corsOrigin       string
-	sharedInviteCode string
-	databaseURL      string
-	redisAddr        string
-	livekitAPIKey    string
-	livekitAPISecret string
-	apnsTeamID       string
-	apnsKeyID        string
-	apnsBundleID     string
-	apnsPrivateKey   string
-	apnsEndpoint     string
-	fcmProjectID     string
-	fcmAccessToken   string
-	fcmEndpoint      string
+	port              string
+	corsOrigin        string
+	sharedInviteCode  string
+	databaseURL       string
+	redisAddr         string
+	livekitAPIKey     string
+	livekitAPISecret  string
+	apnsTeamID        string
+	apnsKeyID         string
+	apnsBundleID      string
+	apnsPrivateKey    string
+	apnsEndpoint      string
+	fcmProjectID      string
+	fcmAccessToken    string
+	fcmServiceAccount string
+	fcmEndpoint       string
 }
 
 type server struct {
@@ -69,11 +73,13 @@ type loginResponse struct {
 }
 
 type member struct {
-	ID          string    `json:"id"`
-	DisplayName string    `json:"displayName"`
-	AvatarURL   string    `json:"avatarURL,omitempty"`
-	CreatedAt   time.Time `json:"createdAt"`
-	LastSeenAt  time.Time `json:"lastSeenAt"`
+	ID              string    `json:"id"`
+	DisplayName     string    `json:"displayName"`
+	AvatarURL       string    `json:"avatarURL,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	LastSeenAt      time.Time `json:"lastSeenAt"`
+	LastReachableAt time.Time `json:"lastReachableAt"`
+	Reachable       bool      `json:"reachable"`
 }
 
 type message struct {
@@ -256,25 +262,39 @@ func (p *apnsProvider) authorizationToken(now time.Time) (string, error) {
 }
 
 type fcmProvider struct {
-	projectID   string
-	accessToken string
-	endpoint    string
-	client      *http.Client
+	projectID      string
+	accessToken    string
+	serviceAccount *googleServiceAccount
+	endpoint       string
+	client         *http.Client
+	tokenMu        sync.Mutex
+	token          string
+	tokenExpiresAt time.Time
 }
 
 func newFCMProvider(cfg config) *fcmProvider {
-	if cfg.fcmProjectID == "" || cfg.fcmAccessToken == "" {
+	serviceAccount, err := parseGoogleServiceAccount(cfg.fcmServiceAccount)
+	if err != nil {
+		slog.Error("disable fcm provider; invalid service account", "error", err)
+		return nil
+	}
+	projectID := strings.TrimSpace(cfg.fcmProjectID)
+	if projectID == "" && serviceAccount != nil {
+		projectID = serviceAccount.ProjectID
+	}
+	if projectID == "" || (cfg.fcmAccessToken == "" && serviceAccount == nil) {
 		return nil
 	}
 	endpoint := strings.TrimSpace(cfg.fcmEndpoint)
 	if endpoint == "" {
-		endpoint = "https://fcm.googleapis.com/v1/projects/" + cfg.fcmProjectID + "/messages:send"
+		endpoint = "https://fcm.googleapis.com/v1/projects/" + projectID + "/messages:send"
 	}
 	return &fcmProvider{
-		projectID:   cfg.fcmProjectID,
-		accessToken: cfg.fcmAccessToken,
-		endpoint:    endpoint,
-		client:      &http.Client{Timeout: 10 * time.Second},
+		projectID:      projectID,
+		accessToken:    cfg.fcmAccessToken,
+		serviceAccount: serviceAccount,
+		endpoint:       endpoint,
+		client:         &http.Client{Timeout: 10 * time.Second},
 	}
 }
 
@@ -287,7 +307,11 @@ func (p *fcmProvider) SendCallPush(ctx context.Context, payload callPushPayload,
 	if err != nil {
 		return err
 	}
-	req.Header.Set("authorization", "Bearer "+p.accessToken)
+	accessToken, err := p.bearerToken(ctx)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("authorization", "Bearer "+accessToken)
 	req.Header.Set("content-type", "application/json")
 
 	resp, err := p.client.Do(req)
@@ -299,6 +323,147 @@ func (p *fcmProvider) SendCallPush(ctx context.Context, payload callPushPayload,
 		return fmt.Errorf("fcm returned %s", resp.Status)
 	}
 	return nil
+}
+
+func (p *fcmProvider) bearerToken(ctx context.Context) (string, error) {
+	if p.accessToken != "" {
+		return p.accessToken, nil
+	}
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+	if p.token != "" && time.Until(p.tokenExpiresAt) > time.Minute {
+		return p.token, nil
+	}
+	if p.serviceAccount == nil {
+		return "", errors.New("missing fcm credentials")
+	}
+	token, expiresAt, err := p.serviceAccount.accessToken(ctx, p.client)
+	if err != nil {
+		return "", err
+	}
+	p.token = token
+	p.tokenExpiresAt = expiresAt
+	return token, nil
+}
+
+type googleServiceAccount struct {
+	ProjectID   string `json:"project_id"`
+	ClientEmail string `json:"client_email"`
+	PrivateKey  string `json:"private_key"`
+	TokenURI    string `json:"token_uri"`
+	privateKey  *rsa.PrivateKey
+}
+
+func parseGoogleServiceAccount(value string) (*googleServiceAccount, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	var account googleServiceAccount
+	if err := json.Unmarshal([]byte(value), &account); err != nil {
+		return nil, err
+	}
+	account.ProjectID = strings.TrimSpace(account.ProjectID)
+	account.ClientEmail = strings.TrimSpace(account.ClientEmail)
+	account.PrivateKey = strings.ReplaceAll(strings.TrimSpace(account.PrivateKey), `\n`, "\n")
+	account.TokenURI = strings.TrimSpace(account.TokenURI)
+	if account.TokenURI == "" {
+		account.TokenURI = "https://oauth2.googleapis.com/token"
+	}
+	if account.ProjectID == "" || account.ClientEmail == "" || account.PrivateKey == "" {
+		return nil, errors.New("project_id, client_email, and private_key are required")
+	}
+	key, err := parseRSAPrivateKey(account.PrivateKey)
+	if err != nil {
+		return nil, err
+	}
+	account.privateKey = key
+	return &account, nil
+}
+
+func parseRSAPrivateKey(value string) (*rsa.PrivateKey, error) {
+	block, _ := pem.Decode([]byte(value))
+	if block == nil {
+		return nil, errors.New("missing pem block")
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
+		return key, nil
+	}
+	parsedKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	key, ok := parsedKey.(*rsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("service account private key must be rsa")
+	}
+	return key, nil
+}
+
+func (a *googleServiceAccount) accessToken(ctx context.Context, client *http.Client) (string, time.Time, error) {
+	now := time.Now()
+	assertion, err := a.jwtAssertion(now)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	body := strings.NewReader("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=" + assertion)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.TokenURI, body)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer resp.Body.Close()
+	var tokenResponse struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+		Error       string `json:"error"`
+		Description string `json:"error_description"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResponse); err != nil {
+		return "", time.Time{}, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		if tokenResponse.Description != "" {
+			return "", time.Time{}, fmt.Errorf("google oauth returned %s: %s", resp.Status, tokenResponse.Description)
+		}
+		return "", time.Time{}, fmt.Errorf("google oauth returned %s", resp.Status)
+	}
+	if tokenResponse.AccessToken == "" {
+		return "", time.Time{}, errors.New("google oauth returned empty access token")
+	}
+	expiresIn := tokenResponse.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 3600
+	}
+	return tokenResponse.AccessToken, now.Add(time.Duration(expiresIn) * time.Second), nil
+}
+
+func (a *googleServiceAccount) jwtAssertion(now time.Time) (string, error) {
+	header, err := json.Marshal(map[string]string{"alg": "RS256", "typ": "JWT"})
+	if err != nil {
+		return "", err
+	}
+	claims, err := json.Marshal(map[string]any{
+		"iss":   a.ClientEmail,
+		"scope": "https://www.googleapis.com/auth/firebase.messaging",
+		"aud":   a.TokenURI,
+		"iat":   now.Unix(),
+		"exp":   now.Add(time.Hour).Unix(),
+	})
+	if err != nil {
+		return "", err
+	}
+	unsigned := base64.RawURLEncoding.EncodeToString(header) + "." + base64.RawURLEncoding.EncodeToString(claims)
+	digest := sha256.Sum256([]byte(unsigned))
+	signature, err := rsa.SignPKCS1v15(rand.Reader, a.privateKey, crypto.SHA256, digest[:])
+	if err != nil {
+		return "", err
+	}
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(signature), nil
 }
 
 type callTokenRequest struct {
@@ -395,21 +560,22 @@ func main() {
 
 func loadConfig() config {
 	return config{
-		port:             env("PORT", "4000"),
-		corsOrigin:       env("CORS_ORIGIN", "*"),
-		sharedInviteCode: env("SHARED_INVITE_CODE", "home"),
-		databaseURL:      env("DATABASE_URL", "postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable"),
-		redisAddr:        env("REDIS_ADDR", "localhost:6379"),
-		livekitAPIKey:    env("LIVEKIT_API_KEY", "devkey"),
-		livekitAPISecret: env("LIVEKIT_API_SECRET", "secret"),
-		apnsTeamID:       env("APNS_TEAM_ID", ""),
-		apnsKeyID:        env("APNS_KEY_ID", ""),
-		apnsBundleID:     env("APNS_BUNDLE_ID", ""),
-		apnsPrivateKey:   env("APNS_PRIVATE_KEY", ""),
-		apnsEndpoint:     env("APNS_ENDPOINT", "https://api.push.apple.com"),
-		fcmProjectID:     env("FCM_PROJECT_ID", ""),
-		fcmAccessToken:   env("FCM_ACCESS_TOKEN", ""),
-		fcmEndpoint:      env("FCM_ENDPOINT", ""),
+		port:              env("PORT", "4000"),
+		corsOrigin:        env("CORS_ORIGIN", "*"),
+		sharedInviteCode:  env("SHARED_INVITE_CODE", "home"),
+		databaseURL:       env("DATABASE_URL", "postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable"),
+		redisAddr:         env("REDIS_ADDR", "localhost:6379"),
+		livekitAPIKey:     env("LIVEKIT_API_KEY", "devkey"),
+		livekitAPISecret:  env("LIVEKIT_API_SECRET", "secret"),
+		apnsTeamID:        env("APNS_TEAM_ID", ""),
+		apnsKeyID:         env("APNS_KEY_ID", ""),
+		apnsBundleID:      env("APNS_BUNDLE_ID", ""),
+		apnsPrivateKey:    env("APNS_PRIVATE_KEY", ""),
+		apnsEndpoint:      env("APNS_ENDPOINT", "https://api.push.apple.com"),
+		fcmProjectID:      env("FCM_PROJECT_ID", ""),
+		fcmAccessToken:    env("FCM_ACCESS_TOKEN", ""),
+		fcmServiceAccount: env("FCM_SERVICE_ACCOUNT_JSON", ""),
+		fcmEndpoint:       env("FCM_ENDPOINT", ""),
 	}
 }
 
@@ -601,9 +767,17 @@ limit 1`, req.AccountEmail, req.DisplayName, req.AvatarURL, userID).Scan(&userID
 
 func (s *server) members(w http.ResponseWriter, r *http.Request) {
 	rows, err := s.db.Query(r.Context(), `
-select id, display_name, avatar_url, created_at, last_seen_at
-from users
-order by last_seen_at desc, created_at desc
+select u.id,
+       u.display_name,
+       u.avatar_url,
+       u.created_at,
+       u.last_seen_at,
+       greatest(u.last_seen_at, coalesce(max(d.last_seen_at), u.last_seen_at)) as last_reachable_at,
+       greatest(u.last_seen_at, coalesce(max(d.last_seen_at), u.last_seen_at)) > now() - interval '30 days' as reachable
+from users u
+left join devices d on d.user_id = u.id
+group by u.id, u.display_name, u.avatar_url, u.created_at, u.last_seen_at
+order by last_reachable_at desc, u.created_at desc
 limit 100`)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch members failed"})
@@ -614,7 +788,7 @@ limit 100`)
 	members := make([]member, 0)
 	for rows.Next() {
 		var item member
-		if err := rows.Scan(&item.ID, &item.DisplayName, &item.AvatarURL, &item.CreatedAt, &item.LastSeenAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.DisplayName, &item.AvatarURL, &item.CreatedAt, &item.LastSeenAt, &item.LastReachableAt, &item.Reachable); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan members failed"})
 			return
 		}
@@ -664,6 +838,10 @@ func (s *server) registerDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.db.Exec(r.Context(), `delete from devices where platform = $1 and push_token = $2 and device_id <> $3`, req.Platform, req.PushToken, req.DeviceID); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "dedupe device token failed"})
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `update users set last_seen_at = now() where id = $1`, req.UserID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "refresh user reachability failed"})
 		return
 	}
 
@@ -905,10 +1083,14 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	now := time.Now().UTC()
+	_, _ = s.db.Exec(ctx, `update users set display_name = $1, last_seen_at = now() where id = $2`, displayName, userID)
 	joinedMember := member{
-		ID:          userID,
-		DisplayName: displayName,
-		LastSeenAt:  time.Now().UTC(),
+		ID:              userID,
+		DisplayName:     displayName,
+		LastSeenAt:      now,
+		LastReachableAt: now,
+		Reachable:       true,
 	}
 	s.publish(ctx, channel, outboundEnvelope{Type: "member:joined", Data: joinedMember})
 
