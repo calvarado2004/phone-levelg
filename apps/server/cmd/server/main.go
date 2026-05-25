@@ -55,14 +55,21 @@ type config struct {
 
 const maxMessageBodyBytes = 6000
 const maxAttachmentBodyBytes = 12 * 1024 * 1024
+const pushQueueCapacity = 4096
+const pushWorkerCount = 16
+const apnsMaxSendAttempts = 6
+const apnsRetryBaseDelay = 2 * time.Second
 
 type server struct {
-	cfg      config
-	db       *pgxpool.Pool
-	redis    *redis.Client
-	upgrader websocket.Upgrader
-	push     pushDispatcher
+	cfg       config
+	db        *pgxpool.Pool
+	redis     *redis.Client
+	upgrader  websocket.Upgrader
+	push      pushDispatcher
+	pushQueue chan pushJob
 }
+
+type pushJob func(context.Context)
 
 type loginRequest struct {
 	DisplayName       string `json:"displayName"`
@@ -254,12 +261,15 @@ func (d compositePushDispatcher) DispatchMessagePush(ctx context.Context, payloa
 }
 
 type apnsProvider struct {
-	teamID     string
-	keyID      string
-	bundleID   string
-	privateKey *ecdsa.PrivateKey
-	endpoint   string
-	client     *http.Client
+	teamID         string
+	keyID          string
+	bundleID       string
+	privateKey     *ecdsa.PrivateKey
+	endpoint       string
+	client         *http.Client
+	tokenMu        sync.Mutex
+	token          string
+	tokenExpiresAt time.Time
 }
 
 func newAPNSProvider(cfg config) *apnsProvider {
@@ -301,15 +311,7 @@ func missingAPNSConfig(cfg config) []string {
 }
 
 func (p *apnsProvider) SendCallPush(ctx context.Context, payload callPushPayload, device pushDevice) error {
-	token, err := p.authorizationToken(time.Now())
-	if err != nil {
-		return err
-	}
 	body, err := json.Marshal(apnsCallPayload(payload))
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint+"/3/device/"+device.PushToken, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -319,21 +321,7 @@ func (p *apnsProvider) SendCallPush(ctx context.Context, payload callPushPayload
 		pushType = "voip"
 		topic += ".voip"
 	}
-	req.Header.Set("authorization", "bearer "+token)
-	req.Header.Set("apns-topic", topic)
-	req.Header.Set("apns-push-type", pushType)
-	req.Header.Set("apns-priority", "10")
-	req.Header.Set("content-type", "application/json")
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return apnsResponseError(resp)
-	}
-	return nil
+	return p.sendPush(ctx, device.PushToken, topic, pushType, body)
 }
 
 func (p *apnsProvider) SendMessagePush(ctx context.Context, payload messagePushPayload, device pushDevice) error {
@@ -345,6 +333,27 @@ func (p *apnsProvider) SendMessagePush(ctx context.Context, payload messagePushP
 }
 
 func (p *apnsProvider) sendPush(ctx context.Context, token, topic, pushType string, body []byte) error {
+	var lastErr error
+	for attempt := 1; attempt <= apnsMaxSendAttempts; attempt++ {
+		err := p.sendPushOnce(ctx, token, topic, pushType, body)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if !isRetryableAPNSError(err) || attempt == apnsMaxSendAttempts {
+			return err
+		}
+		delay := apnsRetryBaseDelay * time.Duration(attempt)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return lastErr
+}
+
+func (p *apnsProvider) sendPushOnce(ctx context.Context, token, topic, pushType string, body []byte) error {
 	authToken, err := p.authorizationToken(time.Now())
 	if err != nil {
 		return err
@@ -370,16 +379,50 @@ func (p *apnsProvider) sendPush(ctx context.Context, token, topic, pushType stri
 	return nil
 }
 
+type apnsStatusError struct {
+	statusCode int
+	status     string
+	detail     string
+}
+
+func (e apnsStatusError) Error() string {
+	if e.detail == "" {
+		return fmt.Sprintf("apns returned %s", e.status)
+	}
+	return fmt.Sprintf("apns returned %s: %s", e.status, e.detail)
+}
+
 func apnsResponseError(resp *http.Response) error {
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 	detail := strings.TrimSpace(string(body))
-	if detail == "" {
-		return fmt.Errorf("apns returned %s", resp.Status)
+	return apnsStatusError{statusCode: resp.StatusCode, status: resp.Status, detail: detail}
+}
+
+func isRetryableAPNSError(err error) bool {
+	var statusErr apnsStatusError
+	if errors.As(err, &statusErr) {
+		return statusErr.statusCode == http.StatusTooManyRequests || statusErr.statusCode >= 500
 	}
-	return fmt.Errorf("apns returned %s: %s", resp.Status, detail)
+	return false
 }
 
 func (p *apnsProvider) authorizationToken(now time.Time) (string, error) {
+	p.tokenMu.Lock()
+	defer p.tokenMu.Unlock()
+	if p.token != "" && now.Before(p.tokenExpiresAt) {
+		return p.token, nil
+	}
+
+	token, err := p.signedAuthorizationToken(now)
+	if err != nil {
+		return "", err
+	}
+	p.token = token
+	p.tokenExpiresAt = now.Add(50 * time.Minute)
+	return token, nil
+}
+
+func (p *apnsProvider) signedAuthorizationToken(now time.Time) (string, error) {
 	header := map[string]string{"alg": "ES256", "kid": p.keyID}
 	claims := map[string]any{"iss": p.teamID, "iat": now.Unix()}
 	unsigned, err := jwtUnsigned(header, claims)
@@ -688,16 +731,18 @@ func main() {
 	defer rdb.Close()
 
 	app := &server{
-		cfg:   cfg,
-		db:    db,
-		redis: rdb,
-		push:  buildPushDispatcher(cfg),
+		cfg:       cfg,
+		db:        db,
+		redis:     rdb,
+		push:      buildPushDispatcher(cfg),
+		pushQueue: make(chan pushJob, pushQueueCapacity),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return cfg.corsOrigin == "*" || r.Header.Get("Origin") == cfg.corsOrigin
 			},
 		},
 	}
+	app.startPushWorkers(ctx)
 
 	router := chi.NewRouter()
 	router.Use(cors.Handler(cors.Options{
@@ -1583,8 +1628,45 @@ func (s *server) dispatchNativeCallPush(ctx context.Context, roomID, senderID st
 	if len(devices) == 0 {
 		return
 	}
-	if err := dispatcher.DispatchCallPush(ctx, payload, devices); err != nil {
-		slog.Error("dispatch call push", "error", err)
+	s.enqueuePush(ctx, "call", func(ctx context.Context) {
+		if err := dispatcher.DispatchCallPush(ctx, payload, devices); err != nil {
+			slog.Error("dispatch call push", "error", err)
+		}
+	})
+}
+
+func (s *server) startPushWorkers(ctx context.Context) {
+	if s.pushQueue == nil {
+		return
+	}
+	for i := 0; i < pushWorkerCount; i++ {
+		go func(workerID int) {
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case job := <-s.pushQueue:
+					if job == nil {
+						continue
+					}
+					jobCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+					job(jobCtx)
+					cancel()
+				}
+			}
+		}(i)
+	}
+}
+
+func (s *server) enqueuePush(ctx context.Context, kind string, job pushJob) {
+	if s.pushQueue == nil {
+		job(ctx)
+		return
+	}
+	select {
+	case s.pushQueue <- job:
+	default:
+		slog.Error("drop push job; queue full", "kind", kind, "capacity", cap(s.pushQueue))
 	}
 }
 
@@ -1742,9 +1824,11 @@ func (s *server) dispatchNativeMessagePush(ctx context.Context, msg message, rec
 		Sender:    msg.Sender,
 		Preview:   "New private message",
 	}
-	if err := dispatcher.DispatchMessagePush(ctx, payload, devices); err != nil {
-		slog.Error("dispatch message push", "error", err)
-	}
+	s.enqueuePush(ctx, "message", func(ctx context.Context) {
+		if err := dispatcher.DispatchMessagePush(ctx, payload, devices); err != nil {
+			slog.Error("dispatch message push", "error", err)
+		}
+	})
 }
 
 func messagePushDevices(devices []pushDevice) []pushDevice {

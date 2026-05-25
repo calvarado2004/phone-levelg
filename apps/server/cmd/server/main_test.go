@@ -247,6 +247,41 @@ func TestFCMServiceAccountMintsAndCachesAccessToken(t *testing.T) {
 	}
 }
 
+func TestEnqueuePushHandlesHundredsOfJobs(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	app := &server{pushQueue: make(chan pushJob, pushQueueCapacity)}
+	app.startPushWorkers(ctx)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	completed := 0
+	const total = 1000
+	for i := 0; i < total; i++ {
+		wg.Add(1)
+		app.enqueuePush(ctx, "test", func(context.Context) {
+			defer wg.Done()
+			mu.Lock()
+			completed++
+			mu.Unlock()
+		})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out waiting for queued push jobs")
+	}
+	if completed != total {
+		t.Fatalf("expected %d completed jobs, got %d", total, completed)
+	}
+}
+
 func TestCallPushPayloadShapesAPNSAndFCM(t *testing.T) {
 	expiresAt := time.Date(2026, 5, 25, 1, 2, 3, 0, time.UTC)
 	payload := callPushPayload{
@@ -1579,6 +1614,54 @@ func testAPNSPrivateKeyPEM(t *testing.T) string {
 		t.Fatalf("marshal ecdsa key: %v", err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey}))
+}
+
+func TestAPNSAuthorizationTokenIsCached(t *testing.T) {
+	provider := newAPNSProvider(config{
+		apnsTeamID:     "TEAMID",
+		apnsKeyID:      "KEYID",
+		apnsBundleID:   "io.levelg.phone",
+		apnsPrivateKey: testAPNSPrivateKeyPEM(t),
+		apnsEndpoint:   "https://api.sandbox.push.apple.com",
+	})
+	if provider == nil {
+		t.Fatal("expected APNs provider")
+	}
+
+	now := time.Unix(1000, 0)
+	first, err := provider.authorizationToken(now)
+	if err != nil {
+		t.Fatalf("first authorization token: %v", err)
+	}
+	second, err := provider.authorizationToken(now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("second authorization token: %v", err)
+	}
+	if first != second {
+		t.Fatal("expected APNs authorization token to be cached")
+	}
+	third, err := provider.authorizationToken(now.Add(51 * time.Minute))
+	if err != nil {
+		t.Fatalf("third authorization token: %v", err)
+	}
+	if third == first {
+		t.Fatal("expected APNs authorization token to refresh after cache expiry")
+	}
+}
+
+func TestAPNSRetryableStatusDetection(t *testing.T) {
+	if !isRetryableAPNSError(apnsStatusError{statusCode: http.StatusTooManyRequests}) {
+		t.Fatal("expected APNs 429 to be retryable")
+	}
+	if !isRetryableAPNSError(apnsStatusError{statusCode: http.StatusInternalServerError}) {
+		t.Fatal("expected APNs 5xx to be retryable")
+	}
+	if isRetryableAPNSError(apnsStatusError{statusCode: http.StatusBadRequest}) {
+		t.Fatal("expected APNs 400 to be non-retryable")
+	}
+	if isRetryableAPNSError(errors.New("network")) {
+		t.Fatal("expected non-status errors to be non-retryable")
+	}
 }
 
 func testGoogleServiceAccountJSON(t *testing.T, projectID, tokenURI string) string {
