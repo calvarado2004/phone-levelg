@@ -37,6 +37,12 @@ assert.match(appTsx, /STORED_SESSION_KEY = "phone-levelg\.session\.v2"/, "Mobile
 assert.match(appTsx, /SESSION_TTL_MS = 30 \* 24 \* 60 \* 60 \* 1000/, "Mobile login sessions must last for 30 days");
 assert.match(appTsx, /AsyncStorage\.setItem\(STORED_SESSION_KEY/, "Successful login must store the session");
 assert.match(appTsx, /AsyncStorage\.removeItem\(STORED_SESSION_KEY/, "Logout must clear the stored 30-day session");
+assert.match(appTsx, /STORED_DEVICE_ID_KEY = "phone-levelg\.device\.v1"/, "Mobile app must persist a stable per-install device id for push registration");
+assert.match(appTsx, /Notifications\.getDevicePushTokenAsync\(\)/, "Mobile app must register native APNs or FCM device tokens");
+assert.match(appTsx, /Notifications\.addPushTokenListener/, "Mobile app must refresh backend device registration when the native push token rotates");
+assert.match(appTsx, /\/devices\/register/, "Mobile app must send device tokens to the private backend registry");
+assert.match(appTsx, /pushTokenTypeForPlatform\(devicePushToken\.type\)/, "Mobile app must identify APNs versus FCM tokens for backend dispatch");
+assert.match(appTsx, /\/devices\/\$\{encodeURIComponent\(deviceID\)\}\?userId=\$\{encodeURIComponent\(nextSession\.userId\)\}/, "Logout must unregister the current device from the backend");
 assert.match(appTsx, /accessibilityLabel="Log out"/, "Mobile app must expose an accessible logout button");
 assert.match(appTsx, /picture\?: string/, "Google profile photos must be read from userinfo");
 assert.match(appTsx, /avatarURL: normalizeAvatarURL\(avatarURL\)/, "Login must send the profile photo URL to the private backend");
@@ -90,7 +96,7 @@ assert.match(appTsx, /sound: DEFAULT_RINGTONE_SOUND/, "Incoming calls must reque
 assert.match(appTsx, /deleteNotificationChannelAsync\(INCOMING_CALL_CHANNEL_ID\)/, "Android must recreate the incoming-call channel when the default ringtone changes");
 assert.match(appTsx, /fullScreenCallingText/, "Active calls must show a phone-style full-screen contact header");
 assert.match(appTsx, /fullScreenLocalVideoFrame/, "Video calls must include a bottom-right local camera preview");
-assert.match(androidNetworkSecurityConfig, /<domain includeSubdomains="false">10\.0\.2\.2<\/domain>/, "Android release builds must allow emulator cleartext access to the local LiveKit host");
+assert.match(androidNetworkSecurityConfig, /<base-config cleartextTrafficPermitted="true" \/>/, "Android release builds must allow private-network cleartext hosts, including Pod and emulator IP ranges");
 assert.ok(existsSync("apps/mobile/android/app/src/main/res/raw/rockstar.mp3"), "Android rockstar ringtone must be packaged as a raw resource");
 assert.ok(existsSync("apps/mobile/ios/PhoneLevelG/rockstar.mp3"), "iOS rockstar ringtone must be packaged in the app bundle");
 assert.match(appTsx, /setNotificationChannelAsync\(INCOMING_CALL_CHANNEL_ID/, "Android incoming calls must use a high-priority notification channel");

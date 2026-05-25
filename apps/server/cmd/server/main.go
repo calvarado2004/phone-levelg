@@ -68,6 +68,24 @@ type message struct {
 	CreatedAt time.Time `json:"createdAt"`
 }
 
+type deviceRegistrationRequest struct {
+	UserID        string `json:"userId"`
+	DeviceID      string `json:"deviceId"`
+	Platform      string `json:"platform"`
+	PushToken     string `json:"pushToken"`
+	PushTokenType string `json:"pushTokenType"`
+	AppVersion    string `json:"appVersion"`
+}
+
+type deviceRegistrationResponse struct {
+	UserID        string    `json:"userId"`
+	DeviceID      string    `json:"deviceId"`
+	Platform      string    `json:"platform"`
+	PushTokenType string    `json:"pushTokenType"`
+	AppVersion    string    `json:"appVersion,omitempty"`
+	LastSeenAt    time.Time `json:"lastSeenAt"`
+}
+
 type callTokenRequest struct {
 	RoomID      string `json:"roomId"`
 	Identity    string `json:"identity"`
@@ -143,6 +161,8 @@ func main() {
 	router.Get("/healthz", app.health)
 	router.Post("/login", app.login)
 	router.Get("/members", app.members)
+	router.Post("/devices/register", app.registerDevice)
+	router.Delete("/devices/{deviceID}", app.deleteDevice)
 	router.Get("/direct/inbox", app.directInbox)
 	router.Get("/rooms/{roomID}/messages", app.messages)
 	router.Post("/rooms/{roomID}/messages", app.createMessage)
@@ -220,6 +240,21 @@ create table if not exists messages (
   body text not null,
   created_at timestamptz not null default now()
 );
+
+create table if not exists devices (
+  device_id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  platform text not null,
+  push_token text not null,
+  push_token_type text not null,
+  app_version text not null default '',
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now(),
+  constraint devices_platform_check check (platform in ('ios', 'android')),
+  constraint devices_push_token_type_check check (push_token_type in ('apns-voip', 'apns', 'fcm', 'expo'))
+);
+create index if not exists devices_user_id_idx on devices(user_id);
+create unique index if not exists devices_platform_push_token_idx on devices(platform, push_token);
 
 with ranked_users as (
   select id,
@@ -340,6 +375,87 @@ limit 100`)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{"members": members})
+}
+
+func (s *server) registerDevice(w http.ResponseWriter, r *http.Request) {
+	var req deviceRegistrationRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.UserID = strings.ToLower(strings.TrimSpace(req.UserID))
+	req.DeviceID = strings.TrimSpace(req.DeviceID)
+	req.Platform = strings.ToLower(strings.TrimSpace(req.Platform))
+	req.PushToken = strings.TrimSpace(req.PushToken)
+	req.PushTokenType = strings.ToLower(strings.TrimSpace(req.PushTokenType))
+	req.AppVersion = strings.TrimSpace(req.AppVersion)
+
+	if req.UserID == "" || req.DeviceID == "" || req.Platform == "" || req.PushToken == "" || req.PushTokenType == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "user, device, platform, and push token required"})
+		return
+	}
+	if len(req.DeviceID) > 128 || len(req.PushToken) > 4096 || len(req.AppVersion) > 80 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device registration value too long"})
+		return
+	}
+	if req.Platform != "ios" && req.Platform != "android" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported device platform"})
+		return
+	}
+	if req.PushTokenType != "apns-voip" && req.PushTokenType != "apns" && req.PushTokenType != "fcm" && req.PushTokenType != "expo" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unsupported push token type"})
+		return
+	}
+
+	var userExists bool
+	if err := s.db.QueryRow(r.Context(), `select exists(select 1 from users where id = $1)`, req.UserID).Scan(&userExists); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "check user failed"})
+		return
+	}
+	if !userExists {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
+		return
+	}
+	if _, err := s.db.Exec(r.Context(), `delete from devices where platform = $1 and push_token = $2 and device_id <> $3`, req.Platform, req.PushToken, req.DeviceID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "dedupe device token failed"})
+		return
+	}
+
+	var response deviceRegistrationResponse
+	err := s.db.QueryRow(r.Context(), `
+insert into devices (device_id, user_id, platform, push_token, push_token_type, app_version)
+values ($1, $2, $3, $4, $5, $6)
+on conflict (device_id) do update
+set user_id = excluded.user_id,
+    platform = excluded.platform,
+    push_token = excluded.push_token,
+    push_token_type = excluded.push_token_type,
+    app_version = excluded.app_version,
+    last_seen_at = now()
+returning user_id, device_id, platform, push_token_type, app_version, last_seen_at`,
+		req.DeviceID, req.UserID, req.Platform, req.PushToken, req.PushTokenType, req.AppVersion,
+	).Scan(&response.UserID, &response.DeviceID, &response.Platform, &response.PushTokenType, &response.AppVersion, &response.LastSeenAt)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "register device failed"})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {
+	deviceID := strings.TrimSpace(chi.URLParam(r, "deviceID"))
+	userID := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("userId")))
+	if deviceID == "" || userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device and user required"})
+		return
+	}
+
+	tag, err := s.db.Exec(r.Context(), `delete from devices where device_id = $1 and user_id = $2`, deviceID, userID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete device failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"deleted": tag.RowsAffected()})
 }
 
 func (s *server) directInbox(w http.ResponseWriter, r *http.Request) {

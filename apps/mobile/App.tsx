@@ -95,6 +95,7 @@ const GOOGLE_DISCOVERY = {
 const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
 const STORED_SESSION_KEY = "phone-levelg.session.v2";
+const STORED_DEVICE_ID_KEY = "phone-levelg.device.v1";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
@@ -257,6 +258,14 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!session || E2E_MODE || !supportsNativePushRegistration()) return;
+    const subscription = Notifications.addPushTokenListener(() => {
+      void registerDeviceForPush(session, apiURL);
+    });
+    return () => subscription.remove();
+  }, [apiURL, session]);
+
+  useEffect(() => {
     const nativeCallKeep = getNativeCallKeep();
     if (E2E_MODE || !nativeCallKeep) return;
     const listeners = [
@@ -379,6 +388,7 @@ export default function App() {
       setAccountEmail(payload.session.accountEmail);
       setAvatarURL(payload.session.avatarURL ?? "");
       setSession(payload.session);
+      void registerDeviceForPush(payload.session, normalizeServerURL(payload.serverURL || DEFAULT_API_URL));
     } catch {
       await AsyncStorage.removeItem(STORED_SESSION_KEY).catch(() => undefined);
     }
@@ -622,6 +632,7 @@ export default function App() {
       const nextSession = await response.json() as Session;
       setSession(nextSession);
       await persistSession(nextSession, apiURL, inviteCode.trim());
+      void registerDeviceForPush(nextSession, apiURL);
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unknown network error";
       Alert.alert("Server unreachable", `Could not connect to ${apiURL}.\n\n${message}`);
@@ -629,7 +640,11 @@ export default function App() {
   }
 
   async function logout() {
+    const currentSession = session;
     await endCurrentCall({ announce: true, status: "Ready" }).catch(() => undefined);
+    if (currentSession) {
+      await unregisterDeviceForPush(currentSession, apiURL).catch(() => undefined);
+    }
     socketRef.current?.close();
     socketRef.current = null;
     await stopIncomingCallTone().catch(() => undefined);
@@ -1549,6 +1564,74 @@ function createCallUUID() {
     const digit = value === "x" ? random : (random & 0x3) | 0x8;
     return digit.toString(16);
   });
+}
+
+function supportsNativePushRegistration() {
+  return Platform.OS === "ios" || Platform.OS === "android";
+}
+
+async function getPersistentDeviceID() {
+  const storedDeviceID = await AsyncStorage.getItem(STORED_DEVICE_ID_KEY);
+  if (storedDeviceID) return storedDeviceID;
+
+  const nextDeviceID = `${Platform.OS}-${createCallUUID()}`;
+  await AsyncStorage.setItem(STORED_DEVICE_ID_KEY, nextDeviceID);
+  return nextDeviceID;
+}
+
+function pushTokenTypeForPlatform(type: string) {
+  if (type === "ios") return "apns";
+  if (type === "android") return "fcm";
+  return "expo";
+}
+
+function serializePushTokenData(data: unknown) {
+  if (typeof data === "string") return data;
+  return JSON.stringify(data);
+}
+
+async function registerDeviceForPush(nextSession: Session, apiURL: string) {
+  if (E2E_MODE || !supportsNativePushRegistration()) return;
+
+  try {
+    const currentPermissions = await Notifications.getPermissionsAsync();
+    const nextPermissions = currentPermissions.granted ? currentPermissions : await Notifications.requestPermissionsAsync();
+    if (!nextPermissions.granted) return;
+
+    const devicePushToken = await Notifications.getDevicePushTokenAsync();
+    const pushToken = serializePushTokenData(devicePushToken.data);
+    if (!pushToken) return;
+
+    await fetch(`${apiURL}/devices/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        userId: nextSession.userId,
+        deviceId: await getPersistentDeviceID(),
+        platform: Platform.OS,
+        pushToken,
+        pushTokenType: pushTokenTypeForPlatform(devicePushToken.type),
+        appVersion: "0.1.0"
+      })
+    });
+  } catch {
+    // Push registration is retried after login restore and token rotation.
+  }
+}
+
+async function unregisterDeviceForPush(nextSession: Session, apiURL: string) {
+  if (E2E_MODE || !supportsNativePushRegistration()) return;
+
+  try {
+    const deviceID = await AsyncStorage.getItem(STORED_DEVICE_ID_KEY);
+    if (!deviceID) return;
+
+    await fetch(`${apiURL}/devices/${encodeURIComponent(deviceID)}?userId=${encodeURIComponent(nextSession.userId)}`, {
+      method: "DELETE"
+    });
+  } catch {
+    // Logout must continue even if the backend cannot remove the stale token.
+  }
 }
 
 function normalizeServerURL(value: string) {

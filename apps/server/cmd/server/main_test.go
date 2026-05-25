@@ -95,6 +95,25 @@ func TestNormalizeAvatarURLAllowsOnlyHTTPS(t *testing.T) {
 	}
 }
 
+func TestRegisterDeviceRejectsInvalidPlatform(t *testing.T) {
+	app := &server{}
+	body, _ := json.Marshal(deviceRegistrationRequest{
+		UserID:        "carlos@example.com",
+		DeviceID:      "iphone",
+		Platform:      "windows",
+		PushToken:     "token",
+		PushTokenType: "fcm",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/devices/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	app.registerDevice(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestRetryEventuallySucceeds(t *testing.T) {
 	attempts := 0
 	err := retry(context.Background(), "test", func(context.Context) error {
@@ -211,6 +230,90 @@ func TestIntegrationLoginAllowsSameDisplayNameForDifferentEmails(t *testing.T) {
 	}
 	if first.DisplayName != second.DisplayName {
 		t.Fatalf("expected display names to match, got %q and %q", first.DisplayName, second.DisplayName)
+	}
+}
+
+func TestIntegrationDeviceRegistrationUsesEmailBackedUser(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home"},
+		db:  db,
+	}
+	session := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos",
+		AccountEmail: "Carlos@example.com",
+		InviteCode:   "home",
+	})
+
+	body, _ := json.Marshal(deviceRegistrationRequest{
+		UserID:        session.UserID,
+		DeviceID:      "iphone-16-pro",
+		Platform:      "ios",
+		PushToken:     "voip-token-1",
+		PushTokenType: "apns-voip",
+		AppVersion:    "0.1.0",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/devices/register", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	app.registerDevice(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected register ok, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	updateBody, _ := json.Marshal(deviceRegistrationRequest{
+		UserID:        session.UserID,
+		DeviceID:      "iphone-16-pro",
+		Platform:      "ios",
+		PushToken:     "voip-token-2",
+		PushTokenType: "apns-voip",
+		AppVersion:    "0.1.1",
+	})
+	updateReq := httptest.NewRequest(http.MethodPost, "/devices/register", bytes.NewReader(updateBody))
+	updateRec := httptest.NewRecorder()
+	app.registerDevice(updateRec, updateReq)
+	if updateRec.Code != http.StatusOK {
+		t.Fatalf("expected update ok, got %d: %s", updateRec.Code, updateRec.Body.String())
+	}
+
+	var count int
+	var userID, token, appVersion string
+	if err := db.QueryRow(ctx, `select count(*), max(user_id), max(push_token), max(app_version) from devices`).Scan(&count, &userID, &token, &appVersion); err != nil {
+		t.Fatalf("query devices: %v", err)
+	}
+	if count != 1 || userID != "carlos@example.com" || token != "voip-token-2" || appVersion != "0.1.1" {
+		t.Fatalf("unexpected device row: count=%d user=%q token=%q app=%q", count, userID, token, appVersion)
+	}
+
+	deleteReq := httptest.NewRequest(http.MethodDelete, "/devices/iphone-16-pro?userId="+url.QueryEscape(session.UserID), nil)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("deviceID", "iphone-16-pro")
+	deleteReq = deleteReq.WithContext(context.WithValue(deleteReq.Context(), chi.RouteCtxKey, routeCtx))
+	deleteRec := httptest.NewRecorder()
+	app.deleteDevice(deleteRec, deleteReq)
+	if deleteRec.Code != http.StatusOK {
+		t.Fatalf("expected delete ok, got %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+	if err := db.QueryRow(ctx, `select count(*) from devices`).Scan(&count); err != nil {
+		t.Fatalf("count devices after delete: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected device delete, got count %d", count)
 	}
 }
 
