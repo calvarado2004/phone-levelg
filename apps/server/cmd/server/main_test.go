@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -928,6 +929,57 @@ func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
 		t.Fatalf("unexpected inbox payload: %#v", inboxPayload.Messages)
 	}
 
+	attachmentBody, _ := json.Marshal(createAttachmentRequest{SenderID: "alice", Data: base64.StdEncoding.EncodeToString([]byte("encrypted-document-bytes"))})
+	attachmentReq := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/attachments", bytes.NewReader(attachmentBody))
+	attachmentRouteCtx := chi.NewRouteContext()
+	attachmentRouteCtx.URLParams.Add("roomID", roomID)
+	attachmentReq = attachmentReq.WithContext(context.WithValue(attachmentReq.Context(), chi.RouteCtxKey, attachmentRouteCtx))
+	attachmentRec := httptest.NewRecorder()
+	app.createAttachment(attachmentRec, attachmentReq)
+	if attachmentRec.Code != http.StatusCreated {
+		t.Fatalf("expected attachment created, got %d: %s", attachmentRec.Code, attachmentRec.Body.String())
+	}
+	var attachmentPayload struct {
+		Attachment attachment `json:"attachment"`
+	}
+	if err := json.Unmarshal(attachmentRec.Body.Bytes(), &attachmentPayload); err != nil {
+		t.Fatalf("decode attachment: %v", err)
+	}
+	if attachmentPayload.Attachment.ID == "" || attachmentPayload.Attachment.Data != "" {
+		t.Fatalf("unexpected attachment create payload: %#v", attachmentPayload.Attachment)
+	}
+
+	getAttachmentReq := httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/attachments/"+attachmentPayload.Attachment.ID+"?userId=bob", nil)
+	getAttachmentRouteCtx := chi.NewRouteContext()
+	getAttachmentRouteCtx.URLParams.Add("roomID", roomID)
+	getAttachmentRouteCtx.URLParams.Add("attachmentID", attachmentPayload.Attachment.ID)
+	getAttachmentReq = getAttachmentReq.WithContext(context.WithValue(getAttachmentReq.Context(), chi.RouteCtxKey, getAttachmentRouteCtx))
+	getAttachmentRec := httptest.NewRecorder()
+	app.getAttachment(getAttachmentRec, getAttachmentReq)
+	if getAttachmentRec.Code != http.StatusOK {
+		t.Fatalf("expected attachment read ok, got %d: %s", getAttachmentRec.Code, getAttachmentRec.Body.String())
+	}
+	var getAttachmentPayload struct {
+		Attachment attachment `json:"attachment"`
+	}
+	if err := json.Unmarshal(getAttachmentRec.Body.Bytes(), &getAttachmentPayload); err != nil {
+		t.Fatalf("decode attachment read: %v", err)
+	}
+	if getAttachmentPayload.Attachment.Data != base64.StdEncoding.EncodeToString([]byte("encrypted-document-bytes")) {
+		t.Fatalf("unexpected attachment bytes: %#v", getAttachmentPayload.Attachment)
+	}
+
+	forbiddenAttachmentReq := httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/attachments/"+attachmentPayload.Attachment.ID+"?userId=charlie", nil)
+	forbiddenAttachmentRouteCtx := chi.NewRouteContext()
+	forbiddenAttachmentRouteCtx.URLParams.Add("roomID", roomID)
+	forbiddenAttachmentRouteCtx.URLParams.Add("attachmentID", attachmentPayload.Attachment.ID)
+	forbiddenAttachmentReq = forbiddenAttachmentReq.WithContext(context.WithValue(forbiddenAttachmentReq.Context(), chi.RouteCtxKey, forbiddenAttachmentRouteCtx))
+	forbiddenAttachmentRec := httptest.NewRecorder()
+	app.getAttachment(forbiddenAttachmentRec, forbiddenAttachmentReq)
+	if forbiddenAttachmentRec.Code != http.StatusForbidden {
+		t.Fatalf("expected attachment read to reject non-participant, got %d", forbiddenAttachmentRec.Code)
+	}
+
 	forbiddenReq := httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages?userId=charlie", nil)
 	forbiddenRouteCtx := chi.NewRouteContext()
 	forbiddenRouteCtx.URLParams.Add("roomID", roomID)
@@ -962,6 +1014,13 @@ func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
 	}
 	if len(inboxAfterDeletePayload.Messages) != 0 {
 		t.Fatalf("expected direct inbox to be empty after delete, got %#v", inboxAfterDeletePayload.Messages)
+	}
+	var attachmentCount int
+	if err := db.QueryRow(ctx, `select count(*) from attachments where room_id = $1`, roomID).Scan(&attachmentCount); err != nil {
+		t.Fatalf("count attachments after delete: %v", err)
+	}
+	if attachmentCount != 0 {
+		t.Fatalf("expected direct chat delete to remove attachments, got %d", attachmentCount)
 	}
 
 	deleteHomeReq := httptest.NewRequest(http.MethodDelete, "/rooms/home/messages?userId=bob", nil)

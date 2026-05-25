@@ -21,7 +21,7 @@ Go backend on OpenShift
   | \
   |  \-- Redis: live room events, call rings, fan-out
   |
-  \----- Postgres: users, rooms, messages
+  \----- Postgres: users, rooms, encrypted message envelopes, encrypted attachment blobs
 
 LiveKit
   |
@@ -54,6 +54,8 @@ The first screen is the actual chat experience after login. The app has:
 - a shared `Home` lobby room
 - a member strip for contacts
 - hidden private 1-1 conversations selected by tapping a member
+- client-side encrypted message bodies for new chat messages
+- client-side encrypted picture and document attachments for 1-1 chats
 - emoji and cat-meme quick actions
 - Google profile photos or initials for user avatars
 - a logout action in the header
@@ -92,10 +94,11 @@ The app is intended to be reachable only from the home network or VPN:
 - Private 1-1 message history requires participant authorization on every request.
 - LiveKit should be exposed only to the same trusted network path.
 
-End-to-end encryption for message bodies is not implemented yet. That should be added before treating the system as sensitive/private against server administrators.
+New message bodies and 1-1 attachment bytes are encrypted on the mobile client before they are sent to the backend. The backend stores and relays opaque `plgenc:v1` message envelopes plus encrypted attachment blobs; mobile clients decrypt fetched history, websocket `message:new` payloads, and downloaded files locally with `tweetnacl` secretbox.
+
+Current limitation: this first phase derives room keys from the private invite code plus room ID. That removes plaintext message bodies from backend storage and relay, but the stronger target remains per-account/per-device key material with encrypted room-key fan-out for up to three devices per Gmail account.
 
 ## State Choices
 
-- Postgres: users and messages.
+- Postgres: users, encrypted message envelopes, and encrypted attachment blobs.
 - Redis: live delivery coordination.
-MongoDB is intentionally not deployed. The MVP only needs Postgres and Redis, which keeps backups, migrations, monitoring, and failure recovery simpler.

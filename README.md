@@ -2,6 +2,8 @@
 
 Phone LevelG is a private mobile messaging app for iOS and Android. The goal is a small, self-hosted communication system for a trusted home/VPN network: messages, emojis, and voice/video calls without depending on a public SaaS backend for core app traffic.
 
+Author: Carlos Alvarado Martinez
+
 The project is intentionally scoped to the pieces the app currently needs:
 
 - React Native / Expo mobile client for iOS and Android
@@ -11,8 +13,6 @@ The project is intentionally scoped to the pieces the app currently needs:
 - LiveKit integration point for voice/video media
 - OpenShift deployment using the internal image registry
 - PVC-backed state using storage class `px-csi-db`
-
-MongoDB is not deployed. The MVP does not need a document database, and keeping the state layer to Postgres plus Redis makes operations, backups, tests, and failure recovery simpler.
 
 ## Repository Layout
 
@@ -58,11 +58,12 @@ flowchart LR
   subgraph Clients["Native clients"]
     Android["Android app\nReact Native + Expo\nnative Google Sign-In\nFCM + full-screen call activity\nrockstar ringtone"]
     IOS["iOS app\nReact Native + Expo\nnative Google Sign-In\nPushKit + CallKit\ncall alert, mic, camera toggles"]
+    Crypto["Client message/file crypto\ntweetnacl secretbox\nExpo Crypto key derivation"]
   end
 
   subgraph Backend["Private backend"]
     API["Go 1.26 API\nchi router"]
-    PG["Postgres 18\nusers, sticky reachable devices,\nmessages, call attempts"]
+    PG["Postgres 18\nusers, sticky reachable devices,\nencrypted message envelopes,\nencrypted attachment blobs,\ncall attempts"]
     Redis["Redis 7\nWebSocket pub/sub fan-out\nactive-session signaling"]
     LK["LiveKit\nWebRTC SFU"]
   end
@@ -75,6 +76,8 @@ flowchart LR
 
   Android -->|"native Google Sign-In SDK"| Google
   IOS -->|"native Google Sign-In SDK"| Google
+  Android -->|"encrypt/decrypt messages and attachments locally"| Crypto
+  IOS -->|"encrypt/decrypt messages and attachments locally"| Crypto
   Android -->|"HTTPS\nGoogle access token login,\nsticky members, messages,\ncall tokens, FCM device registration"| API
   IOS -->|"HTTPS\nGoogle access token login,\nsticky members, messages,\ncall tokens, APNs + VoIP device registration"| API
   Android -->|"WebSocket\nactive chat, live call ring/end/reject"| API
@@ -91,11 +94,12 @@ flowchart LR
   IOS -->|"WebRTC media\nvoice/video"| LK
 ```
 
-The backend does not carry audio or video media. It validates identity, stores messages, registers native push tokens, publishes signaling events, keeps member reachability sticky from recent device registrations, sends native call wake-up pushes, persists call attempts for audit, and issues LiveKit JWTs. Mobile clients use those tokens to connect directly to LiveKit for WebRTC media.
+The backend does not carry audio or video media. It validates identity, stores encrypted message envelopes and opaque encrypted attachment blobs, registers native push tokens, publishes signaling events, keeps member reachability sticky from recent device registrations, sends native call wake-up pushes, persists call attempts for audit, and issues LiveKit JWTs. Mobile clients decrypt messages/files locally and use LiveKit tokens to connect directly to LiveKit for WebRTC media.
 
 ```mermaid
 sequenceDiagram
   participant Caller as Android/iOS caller
+  participant Crypto as Client crypto
   participant Google as Native Google Sign-In
   participant API as Go API
   participant DB as Postgres device registry
@@ -112,6 +116,17 @@ sequenceDiagram
   API->>DB: Upsert device and refresh sticky reachability
   Callee->>API: GET /members
   API-->>Callee: Members with reachable + lastReachableAt
+  Caller->>Crypto: Encrypt message body with room key
+  Caller->>API: POST /rooms/{roomID}/messages with encrypted envelope
+  API->>DB: Store opaque encrypted body
+  API-->>Callee: WebSocket message:new encrypted envelope
+  Callee->>Crypto: Decrypt message body locally
+  Caller->>Crypto: Encrypt document/photo bytes locally
+  Caller->>API: POST /rooms/{roomID}/attachments with encrypted blob
+  API->>DB: Store opaque attachment blob
+  Caller->>API: POST encrypted attachment metadata message
+  Callee->>API: GET encrypted attachment blob
+  Callee->>Crypto: Decrypt file bytes locally
   Caller->>API: POST /calls/token
   API-->>Caller: LiveKit room JWT
   Caller->>LiveKit: Join room and publish microphone/camera
@@ -172,8 +187,9 @@ flowchart TB
 | Native shells | Android Gradle project, iOS Xcode project | Native projects live under `apps/mobile/android` and `apps/mobile/ios`. Release builds are used for emulator, simulator, and device validation. |
 | Calling UI | LiveKit React Native, WebRTC, Android full-screen notifications, iOS CallKit | Calls use a phone-style full-screen surface. Video calls show the remote video, the contact icon/name header, `Calling <contact-name>`, and a bottom-right local camera preview. Incoming calls use the bundled `rockstar.mp3` ringtone. |
 | Identity | Google email plus invite code | The backend keys accounts by normalized `accountEmail`. Display names are presentation-only and can overlap across users. |
-| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores messages, enforces direct-room access, maintains websocket sessions, registers devices, sends APNs/FCM call pushes, and mints LiveKit tokens. |
-| Durable state | Postgres 18 | Users and messages are stored in Postgres. OpenShift uses a `px-csi-db` PVC with `PGDATA` below the mounted PVC root. |
+| Message and file privacy | `tweetnacl` secretbox, Expo Crypto | The mobile app encrypts new message bodies and attachment bytes before persistence and decrypts fetched/websocket messages/files locally. Message envelopes use `plgenc:v1`; attachment metadata uses `plgattach:v1`. |
+| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores opaque encrypted message envelopes and attachment blobs, enforces direct-room access, maintains websocket sessions, registers devices, sends APNs/FCM call pushes, and mints LiveKit tokens. |
+| Durable state | Postgres 18 | Users, encrypted message envelopes, and encrypted attachment blobs are stored in Postgres. OpenShift uses a `px-csi-db` PVC with `PGDATA` below the mounted PVC root. |
 | Live events | Redis 7 | Redis pub/sub fans out chat, presence, direct-room deletion, and call signaling events across backend instances. |
 | Media | LiveKit | LiveKit carries the actual voice/video media. Local Docker and OpenShift configs advertise a reachable node IP and mapped WebRTC ports so clients do not try to connect to container or pod IPs. |
 | Deployment | Docker Compose, OpenShift, internal registry | Docker Compose runs local state and LiveKit. OpenShift manifests create the namespace, stateful services, backend build/deploy resources, routes, APNs/FCM secret keys, and LiveKit networking. |
@@ -195,6 +211,8 @@ It provides:
 - joined-member lobby backed by Postgres
 - shared `Home` lobby room
 - private 1-1 chats between members
+- client-side encrypted message bodies for new chat messages
+- encrypted picture and document sharing in 1-1 chats
 - private-chat deletion from the selected direct conversation
 - real-time messages over WebSocket
 - emoji quick actions
@@ -345,7 +363,7 @@ Responsibilities:
 - validate invite-code login
 - create and update users by normalized account email
 - allow duplicate display names across different emails
-- persist messages in Postgres
+- persist encrypted message envelopes and attachment blobs in Postgres
 - return room history
 - keep 1-1 rooms private to their two members
 - delete a direct chat history on request from either participant
@@ -534,9 +552,17 @@ Two users may have the same `displayName` if their verified Google email address
 
 ### `GET /rooms/{roomID}/messages`
 
-Returns the latest room messages in chronological order.
+Returns the latest room messages in chronological order. New mobile clients store message bodies as opaque `plgenc:v1` encrypted envelopes and decrypt them locally after fetching.
 
 For direct rooms, pass `?userId=...`; non-participants receive `403`.
+
+### `POST /rooms/{roomID}/attachments`
+
+Stores an encrypted attachment blob for a direct room. The backend accepts only opaque base64 ciphertext and rejects lobby-room attachments.
+
+### `GET /rooms/{roomID}/attachments/{attachmentID}`
+
+Returns an encrypted attachment blob to one of the two direct-room participants. The filename, MIME type, and decryption nonce live inside the encrypted `plgattach:v1` chat message, not in backend-readable columns.
 
 ### `DELETE /rooms/{roomID}/messages`
 
@@ -638,7 +664,9 @@ Recommended operational constraints:
 - rotate secrets before using the app seriously
 - back up Postgres and Redis PVCs according to the cluster storage policy
 
-Message end-to-end encryption is not implemented yet. The app is private from a network-access perspective, but server administrators can still access backend data until message encryption is added.
+New message bodies and 1-1 attachment bytes are encrypted on the mobile client before they reach the backend. The server stores and relays opaque `plgenc:v1` message envelopes and encrypted attachment blobs, and clients decrypt locally with `tweetnacl` secretbox.
+
+Current limitation: the first encryption phase derives a room key from the private invite code plus room ID. That protects message contents from casual backend/database inspection, but the stronger corporate-grade target is per-account/per-device key material with encrypted room-key fan-out for the three-device account model.
 
 ## License
 

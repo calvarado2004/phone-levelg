@@ -115,6 +115,18 @@ assert.match(appTsx, /method: "DELETE"/, "Private chats must expose a server-bac
 assert.match(appTsx, /Delete private chat/, "Deleting a private chat must ask for confirmation");
 assert.match(appTsx, /accessibilityLabel=\{`Delete private chat with \$\{selectedMember\.displayName\}`\}/, "Delete private chat button must be accessible");
 assert.match(appTsx, /payload\.type === "message:clear"/, "Mobile app must clear an open private chat when the server announces deletion");
+assert.match(appTsx, /ENCRYPTED_MESSAGE_PREFIX = "plgenc:v1:"/, "Mobile messages must use a versioned encrypted envelope before server persistence");
+assert.match(appTsx, /ATTACHMENT_MESSAGE_PREFIX = "plgattach:v1:"/, "Mobile attachments must use a versioned encrypted metadata envelope");
+assert.match(appTsx, /nacl\.secretbox\(naclUtil\.decodeUTF8\(text\), nonce, key\)/, "Mobile message encryption must use a proven authenticated secretbox primitive");
+assert.match(appTsx, /const fileBytes = naclUtil\.decodeBase64\(fileBase64\)/, "Mobile attachments must decode picked file bytes locally before encryption");
+assert.match(appTsx, /nacl\.secretbox\(fileBytes, nonce, key\)/, "Mobile attachments must encrypt file bytes before upload");
+assert.match(appTsx, /nacl\.secretbox\.open/, "Mobile message rendering must decrypt authenticated encrypted message envelopes locally");
+assert.match(appTsx, /Crypto\.digestStringAsync\(Crypto\.CryptoDigestAlgorithm\.SHA256/, "Mobile message keys must be derived through Expo Crypto rather than ad hoc hashing");
+assert.match(appTsx, /text: encryptedText/, "Composer must send encrypted ciphertext to the backend");
+assert.doesNotMatch(appTsx, /text: nextText/, "Composer must not send plaintext chat messages to the backend");
+assert.match(appTsx, /\/attachments/, "Mobile direct chats must support encrypted attachment upload and download paths");
+assert.match(appTsx, /DocumentPicker\.getDocumentAsync/, "Mobile direct chats must allow selecting encrypted documents");
+assert.match(appTsx, /ImagePicker\.launchImageLibraryAsync/, "Mobile direct chats must allow selecting encrypted photos");
 assert.match(appTsx, /messagesEqual\(current, nextMessages\) \? current : nextMessages/, "Message refresh polling must not rewrite equivalent state on every tick");
 assert.match(appTsx, /membersEqual\(current, nextMembers\) \? current : nextMembers/, "Member refresh polling must not rewrite equivalent state on every tick");
 assert.match(appTsx, /reachable\?: boolean/, "Members must carry sticky device-backed reachability");

@@ -8,6 +8,8 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 - Native wake-up delivery is implemented through APNs/PushKit + CallKit on iOS and FCM + full-screen incoming-call UI on Android.
 - Locked/background validation remains the main open item: the latest release builds are installed, but both platforms still need repeated physical-device tests while locked, backgrounded, and force-closed.
 - Google account creation now uses the native Google Sign-In SDK on Android/iOS. AuthSession remains only for web/dev browser flows.
+- Message bodies are encrypted on the mobile client before backend persistence. The current phase is server-blind shared room encryption; per-device key exchange is the next hardening phase.
+- 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
 
 ## Architecture Target
 
@@ -147,6 +149,29 @@ sequenceDiagram
 - [x] Route Android native Answer actions into the existing LiveKit join path.
 - [ ] Keep local and remote video behavior unchanged after push-based entry.
 
+### Encrypted Messaging
+
+- [x] Add a dedicated encrypted-message phase to this plan.
+- [x] Use a proven authenticated encryption primitive instead of custom cryptography.
+- [x] Encrypt outgoing message bodies on Android/iOS before HTTP persistence.
+- [x] Store only versioned encrypted message envelopes in the existing backend message body column for new messages.
+- [x] Decrypt fetched message history locally before rendering.
+- [x] Decrypt live websocket `message:new` payloads locally before rendering.
+- [x] Keep legacy plaintext message rows readable during rollout.
+- [x] Increase backend message-size validation to account for encrypted envelope overhead.
+- [x] Add native validation coverage that the composer sends ciphertext, not plaintext.
+- [x] Add direct-chat encrypted attachment storage for pictures and documents.
+- [x] Keep attachment blobs opaque to the backend and store encrypted filename/type metadata in the encrypted message envelope.
+- [x] Restrict attachment upload/download to direct-chat participants.
+- [x] Delete direct-chat attachments when the direct chat history is deleted.
+- [x] Add backend integration coverage for direct-chat attachment access and cleanup.
+- [x] Add mobile validation coverage for encrypted document/photo picker wiring.
+- [ ] Replace shared invite-code-derived room keys with per-account/per-device key material.
+- [ ] Add encrypted room-key fan-out for up to three devices per Gmail account.
+- [ ] Add message-authentication failure UI that distinguishes wrong-key history from normal empty chats.
+- [ ] Add backend tests that message storage treats encrypted envelopes as opaque text.
+- [ ] Add richer inline image previews after decrypting downloaded photo attachments.
+
 ### Test Coverage
 
 - [x] Add backend integration tests for device registration, token update, and logout delete.
@@ -191,6 +216,7 @@ sequenceDiagram
 - APNs/FCM credentials must never be committed to the repository.
 - Email remains the stable user identity. Display name is presentation only.
 - Push delivery complements WebSocket signaling; it does not replace LiveKit for media.
+- Current encrypted messaging prevents the backend and database from reading new message bodies, but it derives room keys from the private invite code plus room ID. Treat that as the first privacy phase, not final Signal-grade multi-device end-to-end encryption.
 
 ## Locked-Device Validation Path
 

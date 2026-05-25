@@ -2,8 +2,13 @@ import "react-native-get-random-values";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { StatusBar as ExpoStatusBar } from "expo-status-bar";
 import * as AuthSession from "expo-auth-session";
+import * as DocumentPicker from "expo-document-picker";
 import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
+import * as Crypto from "expo-crypto";
+import * as FileSystem from "expo-file-system/legacy";
+import * as ImagePicker from "expo-image-picker";
 import * as Notifications from "expo-notifications";
+import * as Sharing from "expo-sharing";
 import * as WebBrowser from "expo-web-browser";
 import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
@@ -34,8 +39,11 @@ import {
   PhoneOff,
   Bell,
   Camera,
+  FileText,
+  Image as ImageIcon,
   LogOut,
   Mic,
+  Paperclip,
   SendHorizontal,
   Mail,
   Settings,
@@ -63,6 +71,20 @@ declare const process: {
   env: Record<string, string | undefined>;
 };
 declare const require: (moduleName: string) => any;
+
+const nacl = require("tweetnacl") as {
+  randomBytes: (length: number) => Uint8Array;
+  secretbox: ((message: Uint8Array, nonce: Uint8Array, key: Uint8Array) => Uint8Array) & {
+    open: (box: Uint8Array, nonce: Uint8Array, key: Uint8Array) => Uint8Array | null;
+    nonceLength: number;
+  };
+};
+const naclUtil = require("tweetnacl-util") as {
+  decodeBase64: (value: string) => Uint8Array;
+  encodeBase64: (value: Uint8Array) => string;
+  decodeUTF8: (value: string) => Uint8Array;
+  encodeUTF8: (value: Uint8Array) => string;
+};
 
 const NativeRTCView = Platform.OS === "web"
   ? undefined
@@ -114,6 +136,10 @@ const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const CALL_RING_TIMEOUT_MS = 45 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
+const ENCRYPTED_MESSAGE_PREFIX = "plgenc:v1:";
+const ATTACHMENT_MESSAGE_PREFIX = "plgattach:v1:";
+const ENCRYPTED_MESSAGE_UNAVAILABLE = "Encrypted message unavailable";
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 const ANDROID_STATUS_BAR_HEIGHT = Platform.OS === "android" ? NativeStatusBar.currentHeight ?? 0 : 0;
 const IOS_STATUS_BAR_HEIGHT = Platform.OS === "ios" ? 44 : 0;
 const TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT + IOS_STATUS_BAR_HEIGHT;
@@ -145,7 +171,23 @@ type Message = {
   senderId: string;
   sender: string;
   text: string;
+  attachment?: MessageAttachment;
   createdAt: string;
+};
+
+type MessageAttachment = {
+  attachmentId: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  nonce: string;
+};
+
+type AttachmentUpload = {
+  uri: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
 };
 
 type Member = {
@@ -258,6 +300,7 @@ export default function App() {
     { id: "ana", displayName: "Ana", lastSeenAt: "2026-05-23T14:00:00Z" }
   ] : []);
   const [draft, setDraft] = useState("");
+  const [sendingAttachment, setSendingAttachment] = useState(false);
   const [connected, setConnected] = useState(false);
   const [callActive, setCallActive] = useState(false);
   const [callStatus, setCallStatus] = useState("Ready");
@@ -305,6 +348,7 @@ export default function App() {
   const activeRoomTitle = selectedMember?.displayName ?? "Home";
   const headerTitle = session ? `${activeRoomTitle} - ${session.displayName}` : activeRoomTitle;
   const canSend = useMemo(() => draft.trim().length > 0 && session && connected, [draft, session, connected]);
+  const canSendAttachment = Boolean(session && connected && selectedMember && !sendingAttachment);
   const callPeerName = callPeer?.displayName ?? activeRoomTitle;
   const isFullScreenCall = callActive;
   const selfReachable = session ? members.find(member => member.id === session.userId)?.reachable !== false : false;
@@ -865,7 +909,7 @@ export default function App() {
     if (!userID) return;
     try {
       const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(roomID)}/messages?userId=${encodeURIComponent(userID)}`);
-      const nextMessages = (payload.messages ?? []) as Message[];
+      const nextMessages = await decryptMessages((payload.messages ?? []) as Message[], inviteCode);
       setMessages(current => messagesEqual(current, nextMessages) ? current : nextMessages);
     } catch {
       // Keep the existing view if a transient refresh fails.
@@ -929,12 +973,14 @@ export default function App() {
     const handleSocketMessage = (event: WebSocketMessageEvent) => {
       const payload = JSON.parse(event.data) as SocketEvent;
       if (payload.type === "message:new") {
-        if (payload.data.roomId === activeRoomID) {
-          setMessages(current => mergeMessages(current, payload.data));
-        } else {
-          setUnreadRoomIDs(current => current.includes(payload.data.roomId) ? current : [...current, payload.data.roomId]);
-          void refreshMembers();
-        }
+        void decryptMessage(payload.data, inviteCode).then(nextMessage => {
+          if (nextMessage.roomId === activeRoomID) {
+            setMessages(current => mergeMessages(current, nextMessage));
+          } else {
+            setUnreadRoomIDs(current => current.includes(nextMessage.roomId) ? current : [...current, nextMessage.roomId]);
+            void refreshMembers();
+          }
+        });
       }
       if (payload.type === "message:clear") {
         setUnreadRoomIDs(current => current.filter(roomID => roomID !== payload.data.roomId));
@@ -1096,19 +1142,94 @@ export default function App() {
     if (!session || !text.trim()) return;
     const nextText = text.trim();
     try {
+      const encryptedText = await encryptMessageText(activeRoomID, nextText, inviteCode);
       const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/messages`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           senderId: session.userId,
           displayName: session.displayName,
-          text: nextText
+          text: encryptedText
         })
       });
-      setMessages(current => mergeMessages(current, payload.message));
+      const savedMessage = await decryptMessage(payload.message as Message, inviteCode);
+      setMessages(current => mergeMessages(current, savedMessage));
       setDraft("");
     } catch {
       Alert.alert("Message not sent", "The server did not save this message. Check the connection and try again.");
+    }
+  }
+
+  async function sendAttachment(kind: "image" | "file") {
+    if (!session || !selectedMember || !canSendAttachment) return;
+    try {
+      setSendingAttachment(true);
+      const picked = kind === "image" ? await pickImageAttachment() : await pickDocumentAttachment();
+      if (!picked) return;
+      if (picked.sizeBytes > MAX_ATTACHMENT_BYTES) {
+        Alert.alert("File too large", "Send files up to 8 MB for now.");
+        return;
+      }
+
+      const fileBase64 = await FileSystem.readAsStringAsync(picked.uri, { encoding: FileSystem.EncodingType.Base64 });
+      const fileBytes = naclUtil.decodeBase64(fileBase64);
+      if (fileBytes.length > MAX_ATTACHMENT_BYTES) {
+        Alert.alert("File too large", "Send files up to 8 MB for now.");
+        return;
+      }
+      const key = await deriveRoomMessageKey(activeRoomID, inviteCode);
+      const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+      const encryptedFile = nacl.secretbox(fileBytes, nonce, key);
+      const uploadPayload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/attachments`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          senderId: session.userId,
+          data: naclUtil.encodeBase64(encryptedFile)
+        })
+      });
+
+      const attachmentID = String(uploadPayload.attachment?.id ?? "");
+      if (!attachmentID) {
+        throw new Error("missing attachment id");
+      }
+      const metadata: MessageAttachment = {
+        attachmentId: attachmentID,
+        fileName: picked.fileName,
+        mimeType: picked.mimeType,
+        sizeBytes: picked.sizeBytes,
+        nonce: naclUtil.encodeBase64(nonce)
+      };
+      await sendMessage(`${ATTACHMENT_MESSAGE_PREFIX}${JSON.stringify(metadata)}`);
+    } catch {
+      Alert.alert("Attachment not sent", "The encrypted file was not saved. Check the connection and try again.");
+    } finally {
+      setSendingAttachment(false);
+    }
+  }
+
+  async function openAttachment(message: Message) {
+    if (!session || !message.attachment) return;
+    try {
+      const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(message.roomId)}/attachments/${encodeURIComponent(message.attachment.attachmentId)}?userId=${encodeURIComponent(session.userId)}`);
+      const encryptedData = String(payload.attachment?.data ?? "");
+      const key = await deriveRoomMessageKey(message.roomId, inviteCode);
+      const opened = nacl.secretbox.open(naclUtil.decodeBase64(encryptedData), naclUtil.decodeBase64(message.attachment.nonce), key);
+      if (!opened) {
+        Alert.alert("Attachment locked", "This device could not decrypt the file.");
+        return;
+      }
+
+      const safeName = sanitizeFileName(message.attachment.fileName);
+      const targetURI = `${FileSystem.cacheDirectory ?? ""}${Date.now()}-${safeName}`;
+      await FileSystem.writeAsStringAsync(targetURI, naclUtil.encodeBase64(opened), { encoding: FileSystem.EncodingType.Base64 });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(targetURI, { mimeType: message.attachment.mimeType, dialogTitle: message.attachment.fileName });
+      } else {
+        await Linking.openURL(targetURI);
+      }
+    } catch {
+      Alert.alert("Attachment unavailable", "The app could not download or decrypt this file.");
     }
   }
 
@@ -1830,11 +1951,29 @@ export default function App() {
           contentContainerStyle={styles.messages}
           renderItem={({ item }) => {
             const mine = item.senderId === session.userId;
+            const AttachmentIcon = item.attachment?.mimeType.startsWith("image/") ? ImageIcon : FileText;
             return (
               <View style={[styles.messageGroup, mine ? styles.groupMine : styles.groupTheirs]}>
                 <Text style={[styles.sender, mine && styles.senderMine]}>{mine ? "You" : item.sender}</Text>
                 <View style={[styles.bubble, mine ? styles.mine : styles.theirs]}>
-                  <Text style={styles.messageText}>{item.text}</Text>
+                  {item.attachment ? (
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Open encrypted attachment ${item.attachment.fileName}`}
+                      style={styles.attachmentCard}
+                      onPress={() => void openAttachment(item)}
+                    >
+                      <View style={styles.attachmentIcon}>
+                        <AttachmentIcon color="#4c1d95" size={22} />
+                      </View>
+                      <View style={styles.attachmentTextBlock}>
+                        <Text style={styles.attachmentName} numberOfLines={1}>{item.attachment.fileName}</Text>
+                        <Text style={styles.attachmentMeta}>{formatFileSize(item.attachment.sizeBytes)} encrypted</Text>
+                      </View>
+                    </Pressable>
+                  ) : (
+                    <Text style={styles.messageText}>{item.text}</Text>
+                  )}
                 </View>
                 <Text style={styles.timestamp}>
                   {new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
@@ -1877,6 +2016,26 @@ export default function App() {
         />
 
         <View style={styles.composer}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Attach encrypted document"
+            disabled={!canSendAttachment}
+            hitSlop={8}
+            style={[styles.attachButton, !canSendAttachment && styles.disabledButton]}
+            onPress={() => void sendAttachment("file")}
+          >
+            <Paperclip color="#4c1d95" size={19} />
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Attach encrypted photo"
+            disabled={!canSendAttachment}
+            hitSlop={8}
+            style={[styles.attachButton, !canSendAttachment && styles.disabledButton]}
+            onPress={() => void sendAttachment("image")}
+          >
+            <ImageIcon color="#4c1d95" size={19} />
+          </Pressable>
           <TextInput
             value={draft}
             onChangeText={setDraft}
@@ -1991,6 +2150,126 @@ function mergeMessages(current: Message[], next: Message) {
     return current;
   }
   return [...current, next];
+}
+
+async function encryptMessageText(roomID: string, text: string, inviteCode: string) {
+  if (E2E_MODE) return text;
+  const key = await deriveRoomMessageKey(roomID, inviteCode);
+  const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
+  const box = nacl.secretbox(naclUtil.decodeUTF8(text), nonce, key);
+  return `${ENCRYPTED_MESSAGE_PREFIX}${naclUtil.encodeBase64(nonce)}:${naclUtil.encodeBase64(box)}`;
+}
+
+async function decryptMessages(messages: Message[], inviteCode: string) {
+  return Promise.all(messages.map(message => decryptMessage(message, inviteCode)));
+}
+
+async function decryptMessage(message: Message, inviteCode: string) {
+  if (!isEncryptedMessageText(message.text)) return message;
+  try {
+    const encryptedPayload = message.text.slice(ENCRYPTED_MESSAGE_PREFIX.length);
+    const [nonceText, boxText] = encryptedPayload.split(":");
+    if (!nonceText || !boxText) {
+      return { ...message, text: ENCRYPTED_MESSAGE_UNAVAILABLE };
+    }
+
+    const key = await deriveRoomMessageKey(message.roomId, inviteCode);
+    const opened = nacl.secretbox.open(naclUtil.decodeBase64(boxText), naclUtil.decodeBase64(nonceText), key);
+    if (!opened) {
+      return { ...message, text: ENCRYPTED_MESSAGE_UNAVAILABLE };
+    }
+    const decryptedText = naclUtil.encodeUTF8(opened);
+    const attachment = parseAttachmentMessage(decryptedText);
+    if (attachment) {
+      return { ...message, text: attachment.fileName, attachment };
+    }
+    return { ...message, text: decryptedText };
+  } catch {
+    return { ...message, text: ENCRYPTED_MESSAGE_UNAVAILABLE };
+  }
+}
+
+function isEncryptedMessageText(text: string) {
+  return text.startsWith(ENCRYPTED_MESSAGE_PREFIX);
+}
+
+async function deriveRoomMessageKey(roomID: string, inviteCode: string) {
+  const secret = inviteCode.trim();
+  if (!secret) {
+    throw new Error("missing message encryption secret");
+  }
+  const digest = await Crypto.digestStringAsync(Crypto.CryptoDigestAlgorithm.SHA256, `${secret}:${roomID}`);
+  const pairs = digest.match(/.{1,2}/g) ?? [];
+  return Uint8Array.from(pairs.map(pair => Number.parseInt(pair, 16)));
+}
+
+function parseAttachmentMessage(text: string): MessageAttachment | null {
+  if (!text.startsWith(ATTACHMENT_MESSAGE_PREFIX)) return null;
+  try {
+    const parsed = JSON.parse(text.slice(ATTACHMENT_MESSAGE_PREFIX.length)) as Partial<MessageAttachment>;
+    if (!parsed.attachmentId || !parsed.fileName || !parsed.mimeType || !parsed.nonce) {
+      return null;
+    }
+    return {
+      attachmentId: String(parsed.attachmentId),
+      fileName: String(parsed.fileName).slice(0, 160),
+      mimeType: String(parsed.mimeType).slice(0, 120),
+      sizeBytes: Number.isFinite(parsed.sizeBytes) ? Number(parsed.sizeBytes) : 0,
+      nonce: String(parsed.nonce)
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function pickDocumentAttachment(): Promise<AttachmentUpload | null> {
+  const result = await DocumentPicker.getDocumentAsync({ copyToCacheDirectory: true, multiple: false });
+  if (result.canceled || !result.assets[0]) return null;
+  const asset = result.assets[0];
+  return {
+    uri: asset.uri,
+    fileName: sanitizeFileName(asset.name || `document-${Date.now()}`),
+    mimeType: asset.mimeType || "application/octet-stream",
+    sizeBytes: asset.size ?? await fileSize(asset.uri)
+  };
+}
+
+async function pickImageAttachment(): Promise<AttachmentUpload | null> {
+  const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+  if (!permission.granted) {
+    Alert.alert("Photos unavailable", "Allow photo library access to send encrypted pictures.");
+    return null;
+  }
+  const result = await ImagePicker.launchImageLibraryAsync({
+    mediaTypes: ImagePicker.MediaTypeOptions.Images,
+    quality: 0.9,
+    allowsEditing: false
+  });
+  if (result.canceled || !result.assets[0]) return null;
+  const asset = result.assets[0];
+  return {
+    uri: asset.uri,
+    fileName: sanitizeFileName(asset.fileName || `photo-${Date.now()}.jpg`),
+    mimeType: asset.mimeType || "image/jpeg",
+    sizeBytes: asset.fileSize ?? await fileSize(asset.uri)
+  };
+}
+
+async function fileSize(uri: string) {
+  const info = await FileSystem.getInfoAsync(uri);
+  return info.exists ? info.size ?? 0 : 0;
+}
+
+function sanitizeFileName(value: string) {
+  const cleaned = value.trim().replace(/[^\w. -]+/g, "_").replace(/\s+/g, " ").slice(0, 140);
+  return cleaned || `attachment-${Date.now()}`;
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "Unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
 function messagesEqual(left: Message[], right: Message[]) {
@@ -3012,6 +3291,36 @@ const styles = StyleSheet.create({
     fontSize: 17,
     lineHeight: 23
   },
+  attachmentCard: {
+    width: 230,
+    minHeight: 58,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 10
+  },
+  attachmentIcon: {
+    width: 42,
+    height: 42,
+    borderRadius: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#f3e8ff"
+  },
+  attachmentTextBlock: {
+    flex: 1,
+    minWidth: 0
+  },
+  attachmentName: {
+    color: "#141b24",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  attachmentMeta: {
+    color: "#596575",
+    fontSize: 12,
+    fontWeight: "700",
+    marginTop: 2
+  },
   timestamp: {
     color: "#77808b",
     fontSize: 11,
@@ -3087,6 +3396,16 @@ const styles = StyleSheet.create({
     padding: 10,
     gap: 8,
     backgroundColor: "#f7f3ff"
+  },
+  attachButton: {
+    width: 42,
+    height: 46,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#ddd1ff"
   },
   messageInput: {
     flex: 1,

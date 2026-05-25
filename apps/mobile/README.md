@@ -10,6 +10,8 @@ React Native / Expo client for iOS and Android.
 - Hidden 1-1 chats opened from a lobby member.
 - Direct chat deletion.
 - Real-time messages over WebSocket.
+- Client-side encrypted message bodies for new messages.
+- Encrypted photo and document attachments in 1-1 chats.
 - Quick emoji reactions.
 - Compact cat meme quick messages.
 - Voice/video call join through LiveKit.
@@ -57,6 +59,10 @@ Display names are presentation-only. The backend allows two accounts to use the 
 The lobby shows members, not private chat rooms. Tapping a member opens a deterministic 1-1 room computed from both user IDs. Other members do not see that room and cannot fetch its message history.
 
 Direct chats can be deleted from the selected private conversation. Deletion clears the room history and broadcasts a clear event only to the two participants.
+
+New message bodies are encrypted before they are sent to the backend. The server stores and relays opaque `plgenc:v1` envelopes, and this app decrypts history and live websocket messages locally. Existing plaintext rows remain readable during rollout.
+
+Photo and document attachments are available only inside 1-1 chats. File bytes are encrypted locally before upload; filename/type metadata is carried inside the encrypted `plgattach:v1` chat message so the backend only stores opaque blobs.
 
 ## Background Delivery
 

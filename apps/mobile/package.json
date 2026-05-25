@@ -18,7 +18,12 @@
     "expo": "latest",
     "expo-audio": "~56.0.10",
     "expo-auth-session": "~56.0.11",
+    "expo-crypto": "^56.0.3",
+    "expo-document-picker": "^56.0.4",
+    "expo-file-system": "^56.0.7",
+    "expo-image-picker": "^56.0.13",
     "expo-notifications": "~56.0.13",
+    "expo-sharing": "^56.0.13",
     "expo-status-bar": "latest",
     "expo-web-browser": "~56.0.5",
     "livekit-client": "latest",
@@ -29,7 +34,9 @@
     "react-native-callkeep": "^4.3.16",
     "react-native-get-random-values": "latest",
     "react-native-svg": "latest",
-    "react-native-web": "^0.21.2"
+    "react-native-web": "^0.21.2",
+    "tweetnacl": "^1.0.3",
+    "tweetnacl-util": "^0.15.1"
   },
   "devDependencies": {
     "@types/react": "latest",

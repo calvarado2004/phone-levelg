@@ -51,6 +51,9 @@ type config struct {
 	googleUserInfoURL string
 }
 
+const maxMessageBodyBytes = 6000
+const maxAttachmentBodyBytes = 12 * 1024 * 1024
+
 type server struct {
 	cfg      config
 	db       *pgxpool.Pool
@@ -97,6 +100,14 @@ type message struct {
 	SenderID  string    `json:"senderId"`
 	Sender    string    `json:"sender"`
 	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
+type attachment struct {
+	ID        string    `json:"id"`
+	RoomID    string    `json:"roomId"`
+	SenderID  string    `json:"senderId"`
+	Data      string    `json:"data,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -487,6 +498,11 @@ type createMessageRequest struct {
 	Text        string `json:"text"`
 }
 
+type createAttachmentRequest struct {
+	SenderID string `json:"senderId"`
+	Data     string `json:"data"`
+}
+
 type wsEnvelope struct {
 	Type string          `json:"type"`
 	Data json.RawMessage `json:"data,omitempty"`
@@ -557,6 +573,8 @@ func main() {
 	router.Get("/rooms/{roomID}/messages", app.messages)
 	router.Post("/rooms/{roomID}/messages", app.createMessage)
 	router.Delete("/rooms/{roomID}/messages", app.deleteMessages)
+	router.Post("/rooms/{roomID}/attachments", app.createAttachment)
+	router.Get("/rooms/{roomID}/attachments/{attachmentID}", app.getAttachment)
 	router.Post("/calls/token", app.callToken)
 	router.Get("/ws", app.websocket)
 
@@ -640,6 +658,15 @@ create table if not exists messages (
   body text not null,
   created_at timestamptz not null default now()
 );
+
+create table if not exists attachments (
+  id text primary key,
+  room_id text not null,
+  sender_id text not null references users(id),
+  body bytea not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists attachments_room_created_idx on attachments(room_id, created_at);
 
 create table if not exists devices (
   device_id text primary key,
@@ -1063,6 +1090,83 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
 }
 
+func (s *server) createAttachment(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	var req createAttachmentRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.SenderID = strings.TrimSpace(req.SenderID)
+	req.Data = strings.TrimSpace(req.Data)
+	if roomID == "" || req.SenderID == "" || req.Data == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room, sender, and data required"})
+		return
+	}
+	if len(directMessageRecipients(roomID)) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attachments are only supported in direct chats"})
+		return
+	}
+	if !canAccessRoom(roomID, req.SenderID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	body, err := base64.StdEncoding.DecodeString(req.Data)
+	if err != nil || len(body) == 0 || len(body) > maxAttachmentBodyBytes {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attachment rejected"})
+		return
+	}
+
+	nextAttachment := attachment{
+		ID:        randomID(),
+		RoomID:    roomID,
+		SenderID:  req.SenderID,
+		CreatedAt: time.Now().UTC(),
+	}
+	_, err = s.db.Exec(r.Context(), `
+insert into attachments (id, room_id, sender_id, body, created_at)
+values ($1, $2, $3, $4, $5)`,
+		nextAttachment.ID, nextAttachment.RoomID, nextAttachment.SenderID, body, nextAttachment.CreatedAt)
+	if err != nil {
+		slog.Error("store attachment", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "store attachment failed"})
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{"attachment": nextAttachment})
+}
+
+func (s *server) getAttachment(w http.ResponseWriter, r *http.Request) {
+	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
+	attachmentID := strings.TrimSpace(chi.URLParam(r, "attachmentID"))
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
+	if roomID == "" || attachmentID == "" || userID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room, attachment, and user required"})
+		return
+	}
+	if len(directMessageRecipients(roomID)) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "attachments are only supported in direct chats"})
+		return
+	}
+	if !canAccessRoom(roomID, userID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	var item attachment
+	var body []byte
+	err := s.db.QueryRow(r.Context(), `
+select id, room_id, sender_id, body, created_at
+from attachments
+where id = $1 and room_id = $2`, attachmentID, roomID).Scan(&item.ID, &item.RoomID, &item.SenderID, &body, &item.CreatedAt)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "attachment not found"})
+		return
+	}
+	item.Data = base64.StdEncoding.EncodeToString(body)
+	writeJSON(w, http.StatusOK, map[string]any{"attachment": item})
+}
+
 func (s *server) deleteMessages(w http.ResponseWriter, r *http.Request) {
 	roomID := strings.TrimSpace(chi.URLParam(r, "roomID"))
 	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
@@ -1079,9 +1183,25 @@ func (s *server) deleteMessages(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tag, err := s.db.Exec(r.Context(), `delete from messages where room_id = $1`, roomID)
+	tx, err := s.db.Begin(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete chat failed"})
+		return
+	}
+	defer tx.Rollback(r.Context())
+
+	_, err = tx.Exec(r.Context(), `delete from attachments where room_id = $1`, roomID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete attachments failed"})
+		return
+	}
+	tag, err := tx.Exec(r.Context(), `delete from messages where room_id = $1`, roomID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete messages failed"})
+		return
+	}
+	if err := tx.Commit(r.Context()); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "delete chat failed"})
 		return
 	}
 
@@ -1383,7 +1503,7 @@ on conflict (call_id, device_id) do nothing`,
 
 func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, senderID, sender, text string) (message, bool) {
 	text = strings.TrimSpace(text)
-	if text == "" || len(text) > 2000 {
+	if text == "" || len(text) > maxMessageBodyBytes {
 		return message{}, false
 	}
 

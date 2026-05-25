@@ -6,7 +6,7 @@ Go backend for the private messaging and call-token API.
 
 - Login through a Google email account plus a shared invite code.
 - Reuse users by normalized email while allowing duplicate display names.
-- Store users, joined members, and messages in Postgres.
+- Store users, joined members, opaque encrypted message envelopes, and encrypted attachment blobs in Postgres.
 - Keep direct chat rooms private to their two participants.
 - Delete direct chat history when requested by a participant.
 - Broadcast live chat, member join, and call events through Redis pub/sub.
@@ -45,9 +45,26 @@ Response:
 
 ### `GET /rooms/{roomID}/messages`
 
-Returns the latest 200 messages for a room in chronological order.
+Returns the latest 200 messages for a room in chronological order. New mobile clients write encrypted `plgenc:v1` envelopes in the `text` field and decrypt them locally.
 
 For 1-1 rooms (`dm:{userA}:{userB}`), callers must include `?userId=...`; only the two room members can read the history.
+
+### `POST /rooms/{roomID}/attachments`
+
+Stores an opaque encrypted attachment blob for a direct chat. The request body is:
+
+```json
+{
+  "senderId": "alice",
+  "data": "base64-ciphertext"
+}
+```
+
+Lobby attachments are rejected.
+
+### `GET /rooms/{roomID}/attachments/{attachmentID}?userId=...`
+
+Returns the encrypted attachment blob to a direct-room participant. The backend does not store readable filename or MIME metadata; mobile clients put that data in the encrypted `plgattach:v1` message envelope.
 
 ### `DELETE /rooms/{roomID}/messages?userId=...`
 
@@ -67,7 +84,7 @@ Client send event:
 {
   "type": "message:send",
   "data": {
-    "text": "hello 👋"
+    "text": "plgenc:v1:base64-nonce:base64-ciphertext"
   }
 }
 ```
@@ -117,11 +134,12 @@ dm:{lowerUserID}:{higherUserID}
 
 The mobile client sorts the two user IDs before constructing the room ID, so both devices address the same room. The backend checks that `userId` is one of the two participants before returning history, accepting messages, or deleting that room history.
 
+Message bodies and attachment blobs are intentionally opaque to the backend. The server validates size and room access, stores ciphertext, and relays message envelopes through Redis/WebSocket without decrypting them.
+
 ## State
 
 - Postgres is the durable system of record.
 - Redis is ephemeral coordination for live events.
-MongoDB is not used or deployed in the MVP. It can be introduced later only if a document-heavy feature actually needs it.
 
 ## Tests
 
