@@ -365,6 +365,53 @@ func TestIntegrationLoginAllowsSameDisplayNameForDifferentEmails(t *testing.T) {
 	}
 }
 
+func TestIntegrationLoginReusesSameEmailAccount(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home"},
+		db:  db,
+	}
+
+	first := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos iPhone",
+		AccountEmail: "Carlos@example.com",
+		InviteCode:   "home",
+	})
+	second := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos Android",
+		AccountEmail: " carlos@example.com ",
+		InviteCode:   "home",
+	})
+
+	if first.UserID != "carlos@example.com" || second.UserID != first.UserID {
+		t.Fatalf("expected same normalized email-backed account, got first=%q second=%q", first.UserID, second.UserID)
+	}
+	var count int
+	var displayName string
+	if err := db.QueryRow(ctx, `select count(*), max(display_name) from users where id = 'carlos@example.com'`).Scan(&count, &displayName); err != nil {
+		t.Fatalf("query users: %v", err)
+	}
+	if count != 1 || displayName != "Carlos Android" {
+		t.Fatalf("expected one updated account row, got count=%d display=%q", count, displayName)
+	}
+}
+
 func TestIntegrationDeviceRegistrationUsesEmailBackedUser(t *testing.T) {
 	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
 	if databaseURL == "" {
@@ -446,6 +493,73 @@ func TestIntegrationDeviceRegistrationUsesEmailBackedUser(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("expected device delete, got count %d", count)
+	}
+}
+
+func TestIntegrationDeviceRegistrationKeepsThreePhysicalDevices(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home"},
+		db:  db,
+	}
+	session := loginForTest(t, app, loginRequest{
+		DisplayName:  "Carlos",
+		AccountEmail: "carlos@example.com",
+		InviteCode:   "home",
+	})
+
+	devices := []deviceRegistrationRequest{
+		{UserID: session.UserID, DeviceID: "ios-a", Platform: "ios", PushToken: "apns-a", PushTokenType: "apns", AppVersion: "0.1.0"},
+		{UserID: session.UserID, DeviceID: "ios-a:voip", Platform: "ios", PushToken: "voip-a", PushTokenType: "apns-voip", AppVersion: "0.1.0"},
+		{UserID: session.UserID, DeviceID: "android-b", Platform: "android", PushToken: "fcm-b", PushTokenType: "fcm", AppVersion: "0.1.0"},
+		{UserID: session.UserID, DeviceID: "ios-c", Platform: "ios", PushToken: "apns-c", PushTokenType: "apns", AppVersion: "0.1.0"},
+		{UserID: session.UserID, DeviceID: "android-d", Platform: "android", PushToken: "fcm-d", PushTokenType: "fcm", AppVersion: "0.1.0"},
+	}
+	for _, item := range devices {
+		body, _ := json.Marshal(item)
+		req := httptest.NewRequest(http.MethodPost, "/devices/register", bytes.NewReader(body))
+		rec := httptest.NewRecorder()
+		app.registerDevice(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected register ok for %s, got %d: %s", item.DeviceID, rec.Code, rec.Body.String())
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	rows, err := db.Query(ctx, `select device_id from devices where user_id = $1 order by device_id`, session.UserID)
+	if err != nil {
+		t.Fatalf("query devices: %v", err)
+	}
+	defer rows.Close()
+	remaining := make([]string, 0)
+	for rows.Next() {
+		var deviceID string
+		if err := rows.Scan(&deviceID); err != nil {
+			t.Fatalf("scan device: %v", err)
+		}
+		remaining = append(remaining, deviceID)
+	}
+	if strings.Contains(strings.Join(remaining, ","), "ios-a") {
+		t.Fatalf("expected oldest physical device group to be pruned, remaining=%v", remaining)
+	}
+	if len(remaining) != 3 {
+		t.Fatalf("expected three physical devices after pruning, got rows=%v", remaining)
 	}
 }
 
@@ -814,6 +928,7 @@ func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
 	for _, item := range []pushDevice{
 		{DeviceID: "alice-phone", UserID: "alice", Platform: "ios", PushToken: "alice-token", PushTokenType: "apns"},
 		{DeviceID: "bob-phone", UserID: "bob", Platform: "android", PushToken: "bob-token", PushTokenType: "fcm"},
+		{DeviceID: "bob-iphone", UserID: "bob", Platform: "ios", PushToken: "bob-voip-token", PushTokenType: "apns-voip"},
 		{DeviceID: "charlie-phone", UserID: "charlie", Platform: "ios", PushToken: "charlie-token", PushTokenType: "apns"},
 	} {
 		_, err := db.Exec(ctx, `
@@ -880,8 +995,18 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	if time.Until(pushCall.payload.ExpiresAt) <= 0 {
 		t.Fatalf("expected future push expiration, got %s", pushCall.payload.ExpiresAt)
 	}
-	if len(pushCall.devices) != 1 || pushCall.devices[0].UserID != "bob" || pushCall.devices[0].PushToken != "bob-token" {
-		t.Fatalf("expected only bob device push, got %#v", pushCall.devices)
+	if len(pushCall.devices) != 2 {
+		t.Fatalf("expected push to both bob devices, got %#v", pushCall.devices)
+	}
+	pushedTokens := map[string]bool{}
+	for _, device := range pushCall.devices {
+		if device.UserID != "bob" {
+			t.Fatalf("expected only bob account devices, got %#v", pushCall.devices)
+		}
+		pushedTokens[device.PushToken] = true
+	}
+	if !pushedTokens["bob-token"] || !pushedTokens["bob-voip-token"] {
+		t.Fatalf("expected bob android and iphone tokens, got %#v", pushCall.devices)
 	}
 	var callAttemptCount, callAttemptDeviceCount int
 	if err := db.QueryRow(ctx, `select count(*) from call_attempts where call_id = $1 and room_id = $2 and sender_id = 'alice'`, ringPayload.CallID, aliceRoomID).Scan(&callAttemptCount); err != nil {
@@ -890,11 +1015,11 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	if callAttemptCount != 1 {
 		t.Fatalf("expected persisted call attempt, got %d", callAttemptCount)
 	}
-	if err := db.QueryRow(ctx, `select count(*) from call_attempt_devices where call_id = $1 and recipient_user_id = 'bob' and device_id = 'bob-phone'`, ringPayload.CallID).Scan(&callAttemptDeviceCount); err != nil {
+	if err := db.QueryRow(ctx, `select count(*) from call_attempt_devices where call_id = $1 and recipient_user_id = 'bob'`, ringPayload.CallID).Scan(&callAttemptDeviceCount); err != nil {
 		t.Fatalf("query call attempt devices: %v", err)
 	}
-	if callAttemptDeviceCount != 1 {
-		t.Fatalf("expected persisted call attempt device, got %d", callAttemptDeviceCount)
+	if callAttemptDeviceCount != 2 {
+		t.Fatalf("expected persisted call attempt devices for both bob devices, got %d", callAttemptDeviceCount)
 	}
 
 	if err := charlie.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {

@@ -742,21 +742,14 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 
 	userID := req.AccountEmail
 	err := s.db.QueryRow(r.Context(), `
-with existing as (
-  update users
-  set account_email = $1, display_name = $2, avatar_url = $3, last_seen_at = now()
-  where lower(account_email) = lower($1)
-  returning id
-), inserted as (
-  insert into users (id, account_email, display_name, avatar_url)
-  select $4, $1, $2, $3
-  where not exists (select 1 from existing)
-  returning id
-)
-select id from existing
-union all
-select id from inserted
-limit 1`, req.AccountEmail, req.DisplayName, req.AvatarURL, userID).Scan(&userID)
+insert into users (id, account_email, display_name, avatar_url)
+values ($1, $1, $2, $3)
+on conflict (id) do update
+set account_email = excluded.account_email,
+    display_name = excluded.display_name,
+    avatar_url = excluded.avatar_url,
+    last_seen_at = now()
+returning id`, userID, req.DisplayName, req.AvatarURL).Scan(&userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "create user failed"})
 		return
@@ -863,8 +856,35 @@ returning user_id, device_id, platform, push_token_type, app_version, last_seen_
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "register device failed"})
 		return
 	}
+	if err := s.pruneUserDevices(r.Context(), req.UserID, 3); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "prune device sessions failed"})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *server) pruneUserDevices(ctx context.Context, userID string, maxPhysicalDevices int) error {
+	if maxPhysicalDevices <= 0 {
+		return nil
+	}
+	_, err := s.db.Exec(ctx, `
+with ranked as (
+  select regexp_replace(device_id, ':voip$', '') as physical_device_id,
+         max(last_seen_at) as last_seen_at
+  from devices
+  where user_id = $1
+  group by regexp_replace(device_id, ':voip$', '')
+), kept as (
+  select physical_device_id
+  from ranked
+  order by last_seen_at desc, physical_device_id desc
+  limit $2
+)
+delete from devices
+where user_id = $1
+  and regexp_replace(device_id, ':voip$', '') not in (select physical_device_id from kept)`, userID, maxPhysicalDevices)
+	return err
 }
 
 func (s *server) deleteDevice(w http.ResponseWriter, r *http.Request) {

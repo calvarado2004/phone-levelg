@@ -103,7 +103,7 @@ const GOOGLE_DISCOVERY = {
 };
 const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
-const STORED_SESSION_KEY = "phone-levelg.session.v2";
+const STORED_SESSION_KEY = "phone-levelg.session.v3";
 const STORED_DEVICE_ID_KEY = "phone-levelg.device.v1";
 const STORED_PENDING_CALL_KEY = "phone-levelg.pendingCall.v1";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;

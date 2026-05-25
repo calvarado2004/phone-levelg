@@ -50,6 +50,24 @@ sequenceDiagram
 - [x] Add `POST /devices/register`.
 - [x] Add `DELETE /devices/{deviceID}` or logout cleanup endpoint.
 - [x] Add tests for registering, updating, and replacing device tokens.
+- [x] Enforce one account row per normalized email across Android and iPhone logins.
+- [x] Allow up to 3 physical devices per email account, with iOS APNs and VoIP token rows counting as one physical device.
+- [x] Add tests that a call to one email account fans out to every registered device for that account.
+- [x] Deploy the hardened email/device model to OpenShift.
+- [x] Clear OpenShift users, devices, messages, and call attempts after the hardened model is deployed.
+
+### Google OAuth Account Identity
+
+- [x] Add Expo AuthSession Google OAuth flow with `openid profile email` scopes.
+- [x] Read Google `userinfo` claims for verified email, display name, and profile photo.
+- [ ] Remove typed email/display-name account creation from Android and iPhone release UI.
+- [ ] Send the Google OAuth access token to the backend login endpoint.
+- [ ] Make the backend derive `accountEmail`, `displayName`, and `avatarURL` from Google `userinfo` when a Google token is supplied.
+- [ ] Reject login when Google does not return a verified email.
+- [ ] Keep the invite code as the private-server admission secret after Google identity is verified.
+- [ ] Add backend tests for verified Google-token login, unverified email rejection, and same-Gmail multi-device login.
+- [ ] Add mobile validation that Google login is the only production account creation path.
+- [ ] Document Google OAuth client IDs for Android and iOS release builds.
 
 ### Backend Call Push Dispatch
 
