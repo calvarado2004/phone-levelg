@@ -56,8 +56,8 @@ MongoDB is not deployed. The MVP does not need a document database, and keeping 
 ```mermaid
 flowchart LR
   subgraph Clients["Native clients"]
-    Android["Android app\nReact Native + Expo\nFCM + full-screen call activity\nrockstar ringtone"]
-    IOS["iOS app\nReact Native + Expo\nPushKit + CallKit\ncall alert, mic, camera toggles"]
+    Android["Android app\nReact Native + Expo\nnative Google Sign-In\nFCM + full-screen call activity\nrockstar ringtone"]
+    IOS["iOS app\nReact Native + Expo\nnative Google Sign-In\nPushKit + CallKit\ncall alert, mic, camera toggles"]
   end
 
   subgraph Backend["Private backend"]
@@ -68,14 +68,18 @@ flowchart LR
   end
 
   subgraph Push["Native wake-up providers"]
+    Google["Google Identity\nverified email + profile photo"]
     FCM["Firebase Cloud Messaging\nAndroid high-priority data push"]
     APNS["APNs VoIP Push\nPushKit token delivery"]
   end
 
-  Android -->|"HTTPS\nlogin, sticky members,\nmessages, call tokens,\nFCM device registration"| API
-  IOS -->|"HTTPS\nlogin, sticky members,\nmessages, call tokens,\nAPNs + VoIP device registration"| API
+  Android -->|"native Google Sign-In SDK"| Google
+  IOS -->|"native Google Sign-In SDK"| Google
+  Android -->|"HTTPS\nGoogle access token login,\nsticky members, messages,\ncall tokens, FCM device registration"| API
+  IOS -->|"HTTPS\nGoogle access token login,\nsticky members, messages,\ncall tokens, APNs + VoIP device registration"| API
   Android -->|"WebSocket\nactive chat, live call ring/end/reject"| API
   IOS -->|"WebSocket\nactive chat, live call ring/end/reject"| API
+  API -->|"Bearer token verification\nuserinfo"| Google
   API -->|"SQL"| PG
   API -->|"publish / subscribe"| Redis
   API -->|"JWT minting\n/calls/token"| LK
@@ -92,12 +96,18 @@ The backend does not carry audio or video media. It validates identity, stores m
 ```mermaid
 sequenceDiagram
   participant Caller as Android/iOS caller
+  participant Google as Native Google Sign-In
   participant API as Go API
   participant DB as Postgres device registry
   participant Push as FCM/APNs
   participant Callee as Android/iOS callee
   participant LiveKit as LiveKit
 
+  Callee->>Google: Native Sign-In SDK obtains Google access token
+  Callee->>API: POST /login with Google access token + invite code
+  API->>Google: userinfo token verification
+  Google-->>API: verified email, name, picture
+  API->>DB: Upsert email-keyed account
   Callee->>API: POST /devices/register with APNs/VoIP or FCM token
   API->>DB: Upsert device and refresh sticky reachability
   Callee->>API: GET /members
@@ -210,7 +220,8 @@ EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=your-web-oauth-client-id
 
 The login screen keeps these pieces separate:
 
-- Google OAuth: the only production account creation path on Android and iPhone.
+- Native Google Sign-In: the only production account creation path on Android and iPhone.
+- Google OAuth/AuthSession: retained only for web/dev browser flows.
 - Google email: the stable account key, read from verified Google `userinfo`.
 - Display name and profile icon: read from the Google profile.
 - Server URL: the backend to connect to, defaulting to the private OpenShift route.
@@ -218,13 +229,13 @@ The login screen keeps these pieces separate:
 
 User identity is keyed by normalized Google `accountEmail`, not by display name. Multiple users can share the same display name without colliding. Re-login with the same Gmail account updates the existing member row, display name, avatar URL, and `last_seen_at`. One account can keep up to three physical devices registered; a direct call to that account fans out to every registered device for that email.
 
-Google OAuth release builds require platform client IDs:
+Google Sign-In release builds require platform client IDs:
 
-- `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`: Android OAuth client for package `io.levelg.phone`.
-- `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`: iOS OAuth client for bundle ID `io.levelg.phone`.
+- `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`: Android client for package `io.levelg.phone`.
+- `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`: iOS client for bundle ID `io.levelg.phone`.
 - `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`: web OAuth client for browser/dev flows.
 
-The backend verifies Google access tokens against Google `userinfo` and rejects unverified email addresses. The invite code remains the private backend admission secret after Google identity is verified.
+Android and iOS use `@react-native-google-signin/google-signin`, which delegates account selection to the native Google SDK instead of launching a browser OAuth flow. That avoids Google's mobile OAuth policy errors around insecure custom-scheme browser redirects. The backend still verifies Google access tokens against Google `userinfo` and rejects unverified email addresses. The invite code remains the private backend admission secret after Google identity is verified.
 
 The lobby only lists members. It does not list private 1-1 rooms. Direct room IDs are derived from the two user IDs as `dm:{userA}:{userB}` with sorted IDs, so both devices address the same private conversation. Backend access checks require the requesting user to be one of those two participants before returning direct-message history or accepting direct-message writes.
 
@@ -262,7 +273,7 @@ Always install release builds on Android emulators, Android devices, iOS simulat
 
 ### Google And Firebase Provisioning
 
-Phone LevelG uses Google OAuth for account identity and Firebase Cloud Messaging for Android background call delivery. Keep all generated config and secrets out of GitHub. This repository ignores `apps/mobile/android/app/google-services.json` and `GoogleService-Info.plist`; copy them locally only when building release apps.
+Phone LevelG uses native Google Sign-In for Android/iOS account identity, Google OAuth/AuthSession only for web/dev browser flows, and Firebase Cloud Messaging for Android background call delivery. Keep all generated config and secrets out of GitHub. This repository ignores `apps/mobile/android/app/google-services.json`, `GoogleService-Info.plist`, and local `.env.local` files; copy them locally only when building release apps.
 
 Required Google/Firebase setup:
 
@@ -283,13 +294,19 @@ Required Google/Firebase setup:
    - current local debug/release-test SHA-1 and SHA-256
    - production release keystore SHA-1 and SHA-256 when created
 7. Download `google-services.json` locally to `apps/mobile/android/app/google-services.json`.
-8. Download `GoogleService-Info.plist` locally if a future native iOS Firebase integration needs it.
-9. Build mobile releases with Google OAuth client IDs supplied as environment variables, never hard-coded:
+8. Download `GoogleService-Info.plist` locally to `apps/mobile/ios/PhoneLevelG/GoogleService-Info.plist`.
+9. Build mobile releases with Google client IDs supplied as environment variables or ignored `apps/mobile/.env.local`, never hard-coded:
 
 ```sh
 EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=android-client-id.apps.googleusercontent.com
 EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=ios-client-id.apps.googleusercontent.com
 EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=web-client-id.apps.googleusercontent.com
+```
+
+iOS release builds must also inject the reversed iOS client ID from the local plist so Google Sign-In can return control to the app:
+
+```sh
+GOOGLE_REVERSED_CLIENT_ID="$(plutil -extract REVERSED_CLIENT_ID raw apps/mobile/ios/PhoneLevelG/GoogleService-Info.plist)"
 ```
 
 Useful CLI commands, with placeholder values only:

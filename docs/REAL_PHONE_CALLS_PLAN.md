@@ -5,14 +5,16 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 ## Status
 
 - Current foreground calls work through WebSocket signaling plus LiveKit media.
-- Background/suspended incoming calls do not work yet because WebSocket delivery stops when the OS suspends the app.
-- The correct path is native push delivery: APNs/PushKit + CallKit on iOS, and FCM + full-screen incoming-call notification or Telecom/ConnectionService on Android.
+- Native wake-up delivery is implemented through APNs/PushKit + CallKit on iOS and FCM + full-screen incoming-call UI on Android.
+- Locked/background validation remains the main open item: the latest release builds are installed, but both platforms still need repeated physical-device tests while locked, backgrounded, and force-closed.
+- Google account creation now uses the native Google Sign-In SDK on Android/iOS. AuthSession remains only for web/dev browser flows.
 
 ## Architecture Target
 
 ```mermaid
 sequenceDiagram
   participant Caller as Caller app
+  participant Google as Native Google Sign-In
   participant API as Go backend
   participant Store as Postgres devices table
   participant Push as APNs / FCM
@@ -20,6 +22,11 @@ sequenceDiagram
   participant CalleeApp as Callee app
   participant LiveKit as LiveKit
 
+  CalleeApp->>Google: Native account selection
+  Google-->>CalleeApp: Google access token
+  CalleeApp->>API: POST /login with token + invite code
+  API->>Google: Verify token through userinfo
+  Google-->>API: Verified email, name, profile photo
   Caller->>API: WebSocket call:ring(roomId, mode, callId)
   API->>API: Validate room and target recipients
   API->>Store: Load callee device tokens by email-backed user id
@@ -58,7 +65,10 @@ sequenceDiagram
 
 ### Google OAuth Account Identity
 
-- [x] Add Expo AuthSession Google OAuth flow with `openid profile email` scopes.
+- [x] Add Expo AuthSession Google OAuth flow with `openid profile email` scopes for web/dev browser fallback.
+- [x] Replace Android/iOS browser OAuth with native `@react-native-google-signin/google-signin` to comply with Google's mobile OAuth policy.
+- [x] Install/link native Google Sign-In dependencies on Android and iOS.
+- [x] Inject iOS `GOOGLE_REVERSED_CLIENT_ID` from local `GoogleService-Info.plist` during release builds.
 - [x] Read Google `userinfo` claims for verified email, display name, and profile photo.
 - [x] Remove typed email/display-name account creation from Android and iPhone release UI.
 - [x] Send the Google OAuth access token to the backend login endpoint.
@@ -68,6 +78,7 @@ sequenceDiagram
 - [x] Add backend tests for verified Google-token login, unverified email rejection, and same-Gmail multi-device login.
 - [x] Add mobile validation that Google login is the only production account creation path.
 - [x] Document Google OAuth client IDs for Android and iOS release builds.
+- [x] Validate native Google Sign-In release flow on Android/iOS devices.
 
 ### Backend Call Push Dispatch
 
@@ -89,9 +100,9 @@ sequenceDiagram
 - [x] Add OpenShift secret keys for APNs and FCM without committing real credentials.
 - [x] Add deployment manifest/env wiring for APNs and FCM.
 - [x] Ensure missing push credentials fail gracefully in local development.
-- [ ] Add real `FCM_SERVICE_ACCOUNT_JSON` to the OpenShift `phone-levelg-server` secret.
-- [ ] Add the real Firebase `google-services.json` to `apps/mobile/android/app/` before release builds.
-- [ ] Enroll/use a paid Apple Developer Program team for `io.levelg.phone`.
+- [x] Add real `FCM_SERVICE_ACCOUNT_JSON` to the OpenShift `phone-levelg-server` secret.
+- [x] Add the real Firebase `google-services.json` to `apps/mobile/android/app/` before release builds.
+- [x] Enroll/use a paid Apple Developer Program team for `io.levelg.phone`.
 - [ ] Enable Push Notifications for the explicit `io.levelg.phone` App ID.
 - [ ] Regenerate/download an iOS development or distribution provisioning profile that contains `aps-environment`.
 
@@ -164,8 +175,9 @@ sequenceDiagram
 - [x] Deploy backend to OpenShift.
 - [x] Build iOS Release app.
 - [x] Build Android Release APK.
-- [ ] Install latest iOS Release app on both connected iPhones after Push Notifications provisioning is fixed.
+- [x] Install latest iOS Release app on both connected iPhones.
 - [x] Install Android Release app on emulator/device.
+- [x] Test native Google Sign-In on release builds.
 - [ ] Test foreground call.
 - [ ] Test iPhone locked/background incoming call.
 - [ ] Test Android locked/background incoming call.
@@ -175,14 +187,14 @@ sequenceDiagram
 
 - iOS VoIP pushes must be used only for real calls and must report to CallKit promptly.
 - iOS registers both the regular APNs token and the PushKit VoIP token. Locked/suspended iPhone behavior still needs physical-device validation with valid APNs credentials.
-- The latest iOS release device build is blocked on Apple signing: personal development teams cannot create the Push Notifications provisioning profile required for the `aps-environment` entitlement.
+- The latest iOS release device build installs on both connected iPhones through the paid Apple Developer team. Push entitlement and APNs behavior still need locked-device validation.
 - APNs/FCM credentials must never be committed to the repository.
 - Email remains the stable user identity. Display name is presentation only.
 - Push delivery complements WebSocket signaling; it does not replace LiveKit for media.
 
-## Resume After Apple Developer Activation
+## Locked-Device Validation Path
 
-Apple Developer Program activation can take up to 48 hours. When the paid team is active, continue here:
+Use this path when validating the remaining real-phone behavior:
 
 1. Open Xcode > Settings > Accounts and refresh/download profiles for the paid Apple Developer team.
 2. In Apple Developer > Certificates, Identifiers & Profiles > Identifiers, create or edit explicit App ID `io.levelg.phone`.
@@ -195,4 +207,4 @@ Apple Developer Program activation can take up to 48 hours. When the paid team i
    - iPhone: `1EF56DCA-836E-5DEE-9C0E-9514B5EE56CF`
 7. Log in on both iPhones so the app registers the regular APNs token and PushKit VoIP token with the OpenShift backend.
 8. Run locked/background incoming-call tests iPhone-to-iPhone, Android-to-iPhone, and iPhone-to-Android.
-9. Mark the pending iOS deployment and locked-device validation tasks complete only after the calls ring while the callee app is backgrounded or locked.
+9. Mark the locked-device validation tasks complete only after the calls ring while the callee app is backgrounded, locked, and recently force-closed where the OS allows delivery.

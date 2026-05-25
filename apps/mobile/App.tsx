@@ -5,6 +5,7 @@ import * as AuthSession from "expo-auth-session";
 import { getRecordingPermissionsAsync, requestRecordingPermissionsAsync, setAudioModeAsync, setIsAudioActiveAsync } from "expo-audio";
 import * as Notifications from "expo-notifications";
 import * as WebBrowser from "expo-web-browser";
+import { GoogleSignin } from "@react-native-google-signin/google-signin";
 import { useEffect, useMemo, useRef, useState, type ComponentType } from "react";
 import {
   Alert,
@@ -90,12 +91,15 @@ const OPENSHIFT_API_URL = "https://phone-levelg-server-phone-levelg.apps.ocp-thi
 const DEFAULT_API_URL = process.env.EXPO_PUBLIC_API_URL ?? OPENSHIFT_API_URL;
 const DEFAULT_LIVEKIT_URL = Platform.OS === "web" ? "ws://localhost:7880" : "ws://192.168.1.88:7880";
 const LIVEKIT_URL = process.env.EXPO_PUBLIC_LIVEKIT_URL ?? DEFAULT_LIVEKIT_URL;
+const GOOGLE_ANDROID_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID;
+const GOOGLE_IOS_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID;
+const GOOGLE_WEB_CLIENT_ID = process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
 const GOOGLE_CLIENT_ID =
   Platform.OS === "ios"
-    ? process.env.EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID
+    ? GOOGLE_IOS_CLIENT_ID
     : Platform.OS === "android"
-      ? process.env.EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID
-      : process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID;
+      ? GOOGLE_ANDROID_CLIENT_ID
+      : GOOGLE_WEB_CLIENT_ID;
 const GOOGLE_DISCOVERY = {
   authorizationEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
   tokenEndpoint: "https://oauth2.googleapis.com/token",
@@ -214,7 +218,7 @@ export default function App() {
     {
       clientId: GOOGLE_CLIENT_ID ?? "missing-google-client-id",
       redirectUri: googleRedirectURI,
-      responseType: AuthSession.ResponseType.Token,
+      responseType: AuthSession.ResponseType.Code,
       scopes: ["openid", "profile", "email"],
       extraParams: { prompt: "select_account" }
     },
@@ -292,6 +296,7 @@ export default function App() {
   const pendingNativeDeclineRef = useRef<IncomingCallPayload | null>(null);
   const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
   const googleAuthConfigured = Boolean(GOOGLE_CLIENT_ID);
+  const googleSignInReady = googleAuthConfigured && (Platform.OS === "web" ? Boolean(googleRequest) : true);
 
   const activeRoomID = useMemo(() => {
     if (!session || !selectedMember) return ROOM_ID;
@@ -308,6 +313,15 @@ export default function App() {
   useEffect(() => {
     incomingCallRef.current = incomingCall;
   }, [incomingCall]);
+
+  useEffect(() => {
+    if (Platform.OS === "web" || !GOOGLE_WEB_CLIENT_ID) return;
+    GoogleSignin.configure({
+      webClientId: GOOGLE_WEB_CLIENT_ID,
+      iosClientId: GOOGLE_IOS_CLIENT_ID,
+      scopes: ["openid", "profile", "email"]
+    });
+  }, []);
 
   useEffect(() => {
     if (E2E_MODE) return;
@@ -750,13 +764,64 @@ export default function App() {
   useEffect(() => {
     if (googleResponse?.type !== "success") return;
     const accessToken = googleResponse.authentication?.accessToken;
+    const code = googleResponse.params.code;
     if (!accessToken) {
-      Alert.alert("Google sign-in failed", "Google did not return an access token.");
+      if (!code || !googleRequest?.codeVerifier || !GOOGLE_CLIENT_ID) {
+        Alert.alert("Google sign-in failed", "Google did not return an authorization code.");
+        return;
+      }
+
+      void exchangeGoogleAuthorizationCode(code, googleRequest.codeVerifier);
       return;
     }
 
     void completeGoogleSignIn(accessToken);
-  }, [googleResponse]);
+  }, [googleRequest?.codeVerifier, googleResponse]);
+
+  async function exchangeGoogleAuthorizationCode(code: string, codeVerifier: string) {
+    try {
+      const token = await AuthSession.exchangeCodeAsync(
+        {
+          clientId: GOOGLE_CLIENT_ID ?? "",
+          code,
+          redirectUri: googleRedirectURI,
+          scopes: ["openid", "profile", "email"],
+          extraParams: { code_verifier: codeVerifier }
+        },
+        GOOGLE_DISCOVERY
+      );
+      if (!token.accessToken) {
+        Alert.alert("Google sign-in failed", "Google did not return an access token.");
+        return;
+      }
+      await completeGoogleSignIn(token.accessToken);
+    } catch {
+      Alert.alert("Google sign-in failed", "Could not exchange the Google authorization code.");
+    }
+  }
+
+  async function startGoogleSignIn() {
+    if (Platform.OS === "web") {
+      await promptGoogleSignIn();
+      return;
+    }
+
+    try {
+      if (Platform.OS === "android") {
+        await GoogleSignin.hasPlayServices({ showPlayServicesUpdateDialog: true });
+      }
+      const response = await GoogleSignin.signIn();
+      if (response.type === "cancelled") return;
+      const tokens = await GoogleSignin.getTokens();
+      if (!tokens.accessToken) {
+        Alert.alert("Google sign-in failed", "Google did not return an access token.");
+        return;
+      }
+      await completeGoogleSignIn(tokens.accessToken);
+    } catch {
+      Alert.alert("Google sign-in failed", "Could not complete Google sign-in on this device.");
+    }
+  }
 
   async function completeGoogleSignIn(accessToken: string) {
     const profile = await loadGoogleAccount(accessToken);
@@ -1484,9 +1549,9 @@ export default function App() {
         </View>
         <View style={styles.loginPanel}>
           <Pressable
-            disabled={!googleAuthConfigured || !googleRequest}
-            style={[styles.googleAccountBox, (!googleAuthConfigured || !googleRequest) && styles.disabledButton]}
-            onPress={() => void promptGoogleSignIn()}
+            disabled={!googleSignInReady}
+            style={[styles.googleAccountBox, !googleSignInReady && styles.disabledButton]}
+            onPress={() => void startGoogleSignIn()}
           >
             <View style={styles.googleGMark}>
               <Text style={styles.googleGText}>G</Text>

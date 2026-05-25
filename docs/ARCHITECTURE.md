@@ -7,6 +7,14 @@ Phone LevelG is a private mobile communication app for home/VPN use.
 ```text
 iOS / Android app
   |
+  | Native Google Sign-In SDK
+  v
+Google Identity
+  |
+  | verified email/profile token
+  v
+iOS / Android app
+  |
   | HTTPS + WebSocket over LAN/VPN
   v
 Go backend on OpenShift
@@ -25,6 +33,7 @@ LiveKit
 The backend is intentionally small:
 
 - Google-email account login with invite-code backend access
+- backend verification of Google access tokens through `userinfo`
 - email-keyed users with mutable display names and avatar URLs
 - room message history
 - shared lobby membership
@@ -50,6 +59,8 @@ The first screen is the actual chat experience after login. The app has:
 - a logout action in the header
 - foreground incoming-call UI and platform notification sounds
 
+Android and iOS use `@react-native-google-signin/google-signin` for the account picker and token issuance. The older browser OAuth/AuthSession path remains available only for web/dev browser execution, because Google's mobile OAuth policy rejects insecure custom-scheme browser redirects on native apps.
+
 Private conversations are not discoverable as lobby objects. Both clients compute the same direct room ID from the two user IDs, and the backend rejects direct-room access from any other user.
 
 ## Calls
@@ -66,10 +77,10 @@ The mobile OpenShift build points `EXPO_PUBLIC_LIVEKIT_URL` at `ws://192.168.1.8
 
 Full suspended-app incoming call behavior is a native/push concern:
 
-- iOS requires APNs/PushKit plus CallKit.
-- Android requires FCM plus high-priority notifications or ConnectionService.
+- iOS uses APNs/PushKit plus CallKit.
+- Android uses FCM plus high-priority full-screen call notifications.
 
-The current implementation handles calls while the app is active and obtains LiveKit tokens from the backend.
+The current implementation registers device push tokens, sends native call pushes, shows native incoming-call UI, and obtains LiveKit tokens from the backend. Locked/background physical-device validation remains the main risk area.
 
 ## Privacy Model
 

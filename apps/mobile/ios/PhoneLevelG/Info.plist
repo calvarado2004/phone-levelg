@@ -29,6 +29,7 @@
 			<array>
 				<string>phonelevelg</string>
 				<string>io.levelg.phone</string>
+				<string>$(GOOGLE_REVERSED_CLIENT_ID)</string>
 			</array>
 		</dict>
 	</array>
