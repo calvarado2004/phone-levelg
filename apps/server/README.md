@@ -10,6 +10,8 @@ Go backend for the private messaging and call-token API.
 - Keep direct chat rooms private to their two participants.
 - Delete direct chat history when requested by a participant.
 - Broadcast live chat, member join, and call events through Redis pub/sub.
+- Register native APNs/PushKit/FCM device tokens.
+- Queue APNs/FCM private-message and call pushes without blocking message persistence.
 - Mint LiveKit room tokens for voice/video calls.
 - Expose health checks for OpenShift probes.
 
@@ -121,6 +123,14 @@ Member join broadcast event:
 ### `POST /calls/token`
 
 Mints a LiveKit JWT for a room.
+
+### `POST /devices/register`
+
+Registers or refreshes one native push token for the logged-in account. iOS registers both a regular APNs alert token for private-message notifications and a PushKit VoIP token for real calls. Android registers an FCM token for private messages and high-priority incoming-call data pushes.
+
+## Native Push
+
+The server sends native pushes asynchronously through an in-process queue sized for bursts. APNs provider JWTs are cached before expiration to avoid Apple `TooManyProviderTokenUpdates`, and APNs `429` / `5xx` responses are retried with backoff. WebSocket delivery remains the fast path when the recipient app is active.
 
 ## Identity and Privacy
 

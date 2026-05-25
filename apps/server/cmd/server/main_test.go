@@ -1017,7 +1017,8 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	}
 
 	roomID := directMessageRecipientsRoom("alice", "bob")
-	body, _ := json.Marshal(createMessageRequest{SenderID: "alice", DisplayName: "Alice", Text: "first private message"})
+	encryptedEnvelope := "plgenc:v1:bm9uY2U=:Y2lwaGVydGV4dA=="
+	body, _ := json.Marshal(createMessageRequest{SenderID: "alice", DisplayName: "Alice", Text: encryptedEnvelope})
 	req := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages", bytes.NewReader(body))
 	routeCtx := chi.NewRouteContext()
 	routeCtx.URLParams.Add("roomID", roomID)
@@ -1060,7 +1061,7 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	if err := json.Unmarshal(inboxRec.Body.Bytes(), &inboxPayload); err != nil {
 		t.Fatalf("decode inbox: %v", err)
 	}
-	if len(inboxPayload.Messages) != 1 || inboxPayload.Messages[0].SenderID != "alice" || inboxPayload.Messages[0].Text != "first private message" {
+	if len(inboxPayload.Messages) != 1 || inboxPayload.Messages[0].SenderID != "alice" || inboxPayload.Messages[0].Text != encryptedEnvelope {
 		t.Fatalf("unexpected inbox payload: %#v", inboxPayload.Messages)
 	}
 

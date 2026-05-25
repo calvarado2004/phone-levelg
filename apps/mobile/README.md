@@ -12,6 +12,7 @@ React Native / Expo client for iOS and Android.
 - Real-time messages over WebSocket.
 - Client-side encrypted message bodies for new messages.
 - Encrypted photo and document attachments in 1-1 chats.
+- Inline decrypted image previews for photo attachments.
 - Optional private-message notification sound for 1-1 chats only; the lobby remains silent.
 - Quick emoji reactions.
 - Compact cat meme quick messages.
@@ -45,11 +46,7 @@ Native release builds default LiveKit to `ws://192.168.1.88:7880` so Android and
 
 Always install release builds on Android emulators, Android devices, iOS simulators, and iOS devices. Do not use debug builds for validation unless you are specifically debugging Metro or native development tooling.
 
-Google sign-in uses Expo AuthSession. Configure OAuth clients in Google Cloud for the app package/bundle ID and register the native redirect URI generated for the app scheme:
-
-```text
-phonelevelg://oauthredirect
-```
+Google sign-in uses `@react-native-google-signin/google-signin` on Android and iOS. Expo AuthSession remains only for web/dev browser flows. Configure native Google OAuth clients in Google Cloud/Firebase for package/bundle ID `io.levelg.phone`.
 
 The Google email identifies the user account. The server URL selects the backend, and the server secret is the invite code for that backend.
 
@@ -71,12 +68,12 @@ Private 1-1 message notifications use `message-notification.mp3`, packaged as `m
 
 ## Background Delivery
 
-The app keeps the login session for 30 days and reconnects the WebSocket when the app is active again. True WhatsApp-style background call/message delivery requires server-triggered APNs/FCM push notifications plus native incoming-call integration:
+The app keeps the login session for 30 days and reconnects the WebSocket when the app is active again. Background call/message delivery uses server-triggered APNs/FCM push notifications plus native incoming-call integration:
 
-- iOS: PushKit/CallKit for full incoming-call UI while suspended.
-- Android: FCM plus a high-priority incoming-call notification or Telecom/ConnectionService integration.
+- iOS: regular APNs alerts for private messages, PushKit/CallKit for full incoming-call UI while suspended.
+- Android: FCM private-message notifications plus high-priority data pushes for the full-screen incoming-call activity.
 
-The current in-app incoming-call alert uses the system notification sound while the app process is able to receive the WebSocket event.
+Active clients still receive WebSocket events first. Native pushes cover background, suspended, and locked states where the OS permits delivery. The settings gear owns local options such as private-message sound and microphone/camera preferences.
 
 ## Design Direction
 

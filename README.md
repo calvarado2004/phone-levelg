@@ -71,7 +71,7 @@ flowchart LR
   subgraph Push["Native wake-up providers"]
     Google["Google Identity\nverified email + profile photo"]
     FCM["Firebase Cloud Messaging\nAndroid high-priority data push"]
-    APNS["APNs VoIP Push\nPushKit token delivery"]
+    APNS["APNs\nmessage alerts + VoIP PushKit"]
   end
 
   Android -->|"native Google Sign-In SDK"| Google
@@ -87,14 +87,14 @@ flowchart LR
   API -->|"publish / subscribe"| Redis
   API -->|"JWT minting\n/calls/token"| LK
   API -->|"FCM v1\nservice-account OAuth"| FCM
-  API -->|"APNs HTTP/2\nprovider token + VoIP topic"| APNS
+  API -->|"APNs HTTP/2\ncached provider token\nalert + VoIP topics"| APNS
   FCM -->|"high-priority data call:ring"| Android
   APNS -->|"VoIP call:ring\nCallKit wake-up"| IOS
   Android -->|"WebRTC media\nvoice/video"| LK
   IOS -->|"WebRTC media\nvoice/video"| LK
 ```
 
-The backend does not carry audio or video media. It validates identity, stores encrypted message envelopes and opaque encrypted attachment blobs, registers native push tokens, publishes signaling events, keeps member reachability sticky from recent device registrations, sends native call wake-up pushes, persists call attempts for audit, and issues LiveKit JWTs. Mobile clients decrypt messages/files locally and use LiveKit tokens to connect directly to LiveKit for WebRTC media.
+The backend does not carry audio or video media. It validates identity, stores encrypted message envelopes and opaque encrypted attachment blobs, registers native push tokens, publishes signaling events, keeps member reachability sticky from recent device registrations, queues native message/call pushes, persists call attempts for audit, and issues LiveKit JWTs. Mobile clients decrypt messages/files locally and use LiveKit tokens to connect directly to LiveKit for WebRTC media.
 
 ```mermaid
 sequenceDiagram
@@ -192,11 +192,11 @@ flowchart TB
 | Calling UI | LiveKit React Native, WebRTC, Android full-screen notifications, iOS CallKit | Calls use a phone-style full-screen surface. Video calls show the remote video, the contact icon/name header, `Calling <contact-name>`, and a bottom-right local camera preview. Incoming calls use the bundled `rockstar.mp3` ringtone. |
 | Identity | Google email plus invite code | The backend keys accounts by normalized `accountEmail`. Display names are presentation-only and can overlap across users. |
 | Message and file privacy | `tweetnacl` secretbox, Expo Crypto | The mobile app encrypts new message bodies and attachment bytes before persistence and decrypts fetched/websocket messages/files locally. Message envelopes use `plgenc:v1`; attachment metadata uses `plgattach:v1`. |
-| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores opaque encrypted message envelopes and attachment blobs, enforces direct-room access, maintains websocket sessions, registers devices, sends APNs/FCM call pushes, and mints LiveKit tokens. |
+| Backend API | Go 1.26, chi, pgx, gorilla/websocket | The API validates logins, stores opaque encrypted message envelopes and attachment blobs, enforces direct-room access, maintains websocket sessions, registers devices, queues APNs/FCM message and call pushes, and mints LiveKit tokens. |
 | Durable state | Postgres 18 | Users, encrypted message envelopes, and encrypted attachment blobs are stored in Postgres. OpenShift uses a `px-csi-db` PVC with `PGDATA` below the mounted PVC root. |
 | Live events | Redis 7 | Redis pub/sub fans out chat, presence, direct-room deletion, and call signaling events across backend instances. |
 | Media | LiveKit | LiveKit carries the actual voice/video media. Local Docker and OpenShift configs advertise a reachable node IP and mapped WebRTC ports so clients do not try to connect to container or pod IPs. |
-| Deployment | Docker Compose, OpenShift, internal registry | Docker Compose runs local state and LiveKit. OpenShift manifests create the namespace, stateful services, backend build/deploy resources, routes, APNs/FCM secret keys, and LiveKit networking. |
+| Deployment | Docker Compose, OpenShift, internal registry | Docker Compose runs local state and LiveKit. OpenShift manifests create the namespace, stateful services, backend build/deploy resources, routes, APNs/FCM secret references, and LiveKit networking. |
 | Validation | Go tests, TypeScript, native asset checks, Playwright | Tests cover backend behavior, deployment assumptions, native project assets, mobile build assumptions, and screen rendering. |
 
 ## Runtime Components
@@ -229,11 +229,12 @@ It provides:
 - bottom-right self camera preview during video calls
 - Android FCM call pushes through a native Firebase Messaging service
 - iOS PushKit/CallKit call pushes through the paid Apple Developer team
+- regular APNs/FCM private-message pushes while the recipient app is backgrounded
 - native Android and iOS projects for IDE/device builds
 
 Encrypted picture attachments require native photo-library permissions. iOS declares `NSPhotoLibraryUsageDescription`; Android declares `READ_MEDIA_IMAGES` for modern devices and keeps `READ_EXTERNAL_STORAGE` for Android 12 and older. Photo and document pickers request platform-provided base64 bytes first, then fall back to readable app-cache/content URIs before local encryption. Document attachments use the platform document picker and do not expose readable file contents to the backend.
 
-Private 1-1 chat notifications use the bundled `message-notification.mp3` sound through a dedicated Android notification channel and the iOS notification sound path. Lobby messages stay silent. Users can turn the private-message sound on or off from the in-app toggle; the preference is stored locally on each device.
+Private 1-1 chat notifications use the bundled `message-notification.mp3` sound through a dedicated Android notification channel and the iOS notification sound path. Lobby messages stay silent. Users can turn the private-message sound on or off from the settings gear; the preference is stored locally on each device.
 
 Important environment variables:
 
@@ -377,7 +378,7 @@ Use `https://api.sandbox.push.apple.com` for Xcode-installed development builds 
 
 ### Android Push Provisioning
 
-Real Android background call delivery requires Firebase Cloud Messaging. Add the Firebase Android app config file at `apps/mobile/android/app/google-services.json` for package `io.levelg.phone`, then rebuild and install the release APK. Configure the OpenShift server secret with `FCM_SERVICE_ACCOUNT_JSON` from a Firebase service account that can send FCM v1 messages. Without both pieces, calls only reach Android while the app is already open over WebSocket.
+Real Android background call and message delivery requires Firebase Cloud Messaging. Add the Firebase Android app config file at `apps/mobile/android/app/google-services.json` for package `io.levelg.phone`, then rebuild and install the release APK. Configure the OpenShift server secret with `FCM_SERVICE_ACCOUNT_JSON` from a Firebase service account that can send FCM v1 messages. Without both pieces, calls and private-message notifications only reach Android while the app is already open over WebSocket.
 
 ### Go Backend
 
@@ -438,7 +439,9 @@ The OpenShift service receives a MetalLB IP from the libvirt network. The host r
 
 The app/backend integration point is already present: the backend issues LiveKit JWTs from `/calls/token`.
 
-Native full-screen incoming-call plumbing is implemented through APNs/PushKit/CallKit on iOS and FCM high-priority data messages plus an Android full-screen call activity. iOS release builds now install on physical devices through the paid Apple Developer team. Android still requires real Firebase configuration and OpenShift FCM credentials before background calls can work.
+Native full-screen incoming-call plumbing is implemented through APNs/PushKit/CallKit on iOS and FCM high-priority data messages plus an Android full-screen call activity. Private-message notifications use regular APNs alert pushes on iOS and FCM on Android. The deployed backend caches APNs provider tokens, retries APNs throttling/server errors, and processes push sends through an async queue so message persistence is not blocked by provider latency.
+
+LiveKit deployed secrets must not use the local `devkey:secret` pair. LiveKit requires secrets of at least 32 characters, and the app server `LIVEKIT_API_KEY` / `LIVEKIT_API_SECRET` must match the LiveKit deployment's `LIVEKIT_KEYS` secret.
 
 ## Local Development
 

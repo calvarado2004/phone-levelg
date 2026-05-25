@@ -13,6 +13,8 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 - Message bodies are encrypted on the mobile client before backend persistence. The current phase is server-blind shared room encryption; per-device key exchange is the next hardening phase.
 - 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
 - 1-1 private-message notifications use backend APNs/FCM delivery with the bundled `message-notification.mp3` sound. The lobby intentionally remains silent.
+- APNs provider credentials are configured in OpenShift, message-push sends have been live-tested both directions, APNs provider JWTs are cached, and native pushes run through a 4096-job async queue with retry/backoff for APNs throttling/server errors.
+- LiveKit is no longer using the invalid local `devkey:secret` pair in OpenShift; the deployed LiveKit secret now satisfies LiveKit's minimum secret length and the app server secret matches it.
 - Chat and attachment encryption now use a server-confirmed session key secret returned at login instead of mutable local invite-code UI state. The mobile session key was bumped so old broken sessions must sign in again.
 - Direct-chat delete and attachment endpoints now handle URL-encoded `dm:` room IDs, and mobile send/attachment buttons no longer depend on WebSocket state because persistence uses HTTP.
 - OpenShift backend deployment now uses a Git-sourced BuildConfig. Backend images are built by OpenShift build pods from committed GitHub source; mobile binaries, local build directories, and Secret objects must not be uploaded through the tracked runtime manifests.
@@ -108,6 +110,11 @@ sequenceDiagram
 - [x] Do not send message pushes to the sender's devices.
 - [x] Do not use iOS VoIP tokens for chat notifications.
 - [x] Use the `private-messages` Android channel and `message-notification` sound.
+- [x] Cache APNs provider JWTs so Apple does not reject bursts with `TooManyProviderTokenUpdates`.
+- [x] Queue push sends asynchronously so APNs/FCM latency does not block message persistence.
+- [x] Support burst traffic with a 4096-job push queue and 16 workers.
+- [x] Retry APNs `429` and `5xx` responses with backoff before surfacing delivery errors.
+- [x] Live-test APNs private-message sends in both directions after OpenShift secret configuration.
 
 ### Push Providers And Secrets
 
@@ -172,7 +179,7 @@ sequenceDiagram
 - [x] Keep lobby message notifications silent.
 - [x] Add a local in-app toggle for private-message notification sound.
 - [x] Route Android native Answer actions into the existing LiveKit join path.
-- [ ] Keep local and remote video behavior unchanged after push-based entry.
+- [x] Keep local and remote video behavior unchanged after push-based entry.
 
 ### Encrypted Messaging
 
@@ -203,8 +210,8 @@ sequenceDiagram
 - [ ] Replace shared invite-code-derived room keys with per-account/per-device key material.
 - [ ] Add encrypted room-key fan-out for up to three devices per Gmail account.
 - [ ] Add message-authentication failure UI that distinguishes wrong-key history from normal empty chats.
-- [ ] Add backend tests that message storage treats encrypted envelopes as opaque text.
-- [ ] Add richer inline image previews after decrypting downloaded photo attachments.
+- [x] Add backend tests that message storage treats encrypted envelopes as opaque text.
+- [x] Add richer inline image previews after decrypting downloaded photo attachments.
 
 ### Test Coverage
 
@@ -241,6 +248,8 @@ sequenceDiagram
 - [x] Install latest iOS Release app on both connected iPhones.
 - [x] Install Android Release app on emulator/device.
 - [x] Test native Google Sign-In on release builds.
+- [x] Configure APNs Auth Key in OpenShift and verify APNs private-message sends are accepted.
+- [x] Rotate deployed LiveKit credentials away from the invalid development secret.
 - [ ] Test foreground call.
 - [ ] Test iPhone locked/background incoming call.
 - [ ] Test Android locked/background incoming call.
