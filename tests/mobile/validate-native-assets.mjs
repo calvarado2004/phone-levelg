@@ -33,6 +33,7 @@ assert.match(appTsx, /TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT \+ IOS_ST
 assert.match(appTsx, /paddingTop: 10 \+ TOP_SAFE_AREA_HEIGHT/, "Header must reserve status bar space so call buttons are tappable");
 assert.doesNotMatch(appTsx, /SafeAreaView/, "App must avoid deprecated React Native SafeAreaView warnings");
 assert.match(appTsx, /@react-native-async-storage\/async-storage/, "Mobile app must persist sessions locally");
+assert.match(appTsx, /STORED_SESSION_KEY = "phone-levelg\.session\.v2"/, "Mobile app must force a fresh login after switching user ids to normalized emails");
 assert.match(appTsx, /SESSION_TTL_MS = 30 \* 24 \* 60 \* 60 \* 1000/, "Mobile login sessions must last for 30 days");
 assert.match(appTsx, /AsyncStorage\.setItem\(STORED_SESSION_KEY/, "Successful login must store the session");
 assert.match(appTsx, /AsyncStorage\.removeItem\(STORED_SESSION_KEY/, "Logout must clear the stored 30-day session");

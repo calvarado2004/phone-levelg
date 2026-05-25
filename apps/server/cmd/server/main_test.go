@@ -152,6 +152,9 @@ func TestIntegrationLoginUsesEmailAsStableAccount(t *testing.T) {
 	if first.UserID != second.UserID {
 		t.Fatalf("expected same user id for same email, got %q and %q", first.UserID, second.UserID)
 	}
+	if second.UserID != "carlos@example.com" {
+		t.Fatalf("expected normalized email as user id, got %q", second.UserID)
+	}
 	if second.DisplayName != "Carlitos" {
 		t.Fatalf("expected display name update, got %q", second.DisplayName)
 	}
@@ -202,6 +205,9 @@ func TestIntegrationLoginAllowsSameDisplayNameForDifferentEmails(t *testing.T) {
 
 	if first.UserID == second.UserID {
 		t.Fatalf("expected different users for different emails, got %q", first.UserID)
+	}
+	if first.UserID != "carlos@example.com" || second.UserID != "carlitos@example.com" {
+		t.Fatalf("expected email-backed user ids, got %q and %q", first.UserID, second.UserID)
 	}
 	if first.DisplayName != second.DisplayName {
 		t.Fatalf("expected display names to match, got %q and %q", first.DisplayName, second.DisplayName)

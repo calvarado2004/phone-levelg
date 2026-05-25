@@ -94,7 +94,7 @@ const GOOGLE_DISCOVERY = {
 };
 const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
-const STORED_SESSION_KEY = "phone-levelg.session.v1";
+const STORED_SESSION_KEY = "phone-levelg.session.v2";
 const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
@@ -1001,10 +1001,17 @@ export default function App() {
     if (!nextDevice) return;
 
     try {
+      setLocalVideoTrack(undefined);
       await room.switchActiveDevice("videoinput", nextDevice.deviceId);
       setCameraDeviceID(nextDevice.deviceId);
       syncVideoTracks(room);
+      setTimeout(() => {
+        if (roomRef.current === room) {
+          syncVideoTracks(room);
+        }
+      }, 250);
     } catch {
+      syncVideoTracks(room);
       Alert.alert("Camera unavailable", "The app could not switch to the other camera.");
     }
   }
@@ -1395,9 +1402,19 @@ function CameraStreamView({ track, mirror, zOrder }: { track: LiveKitVideoTrack;
   const [streamURL, setStreamURL] = useState("");
 
   useEffect(() => {
+    let cancelled = false;
     const mediaStream = track.mediaStream as unknown as { toURL?: () => string } | undefined;
-    setStreamURL(mediaStream?.toURL?.() ?? "");
-  }, [track]);
+    setStreamURL("");
+    const nextStreamURL = mediaStream?.toURL?.() ?? "";
+    requestAnimationFrame(() => {
+      if (!cancelled) {
+        setStreamURL(nextStreamURL);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [track, track.mediaStreamTrack?.id]);
 
   if (!streamURL) {
     return (

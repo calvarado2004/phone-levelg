@@ -292,7 +292,7 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID := randomID()
+	userID := req.AccountEmail
 	err := s.db.QueryRow(r.Context(), `
 with existing as (
   update users
