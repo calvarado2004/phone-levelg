@@ -170,6 +170,13 @@ func TestCallPushPayloadShapesAPNSAndFCM(t *testing.T) {
 	if message["token"] != "fcm-token" || data["type"] != "call:ring" || data["callId"] != "call-1" || data["mode"] != "video" {
 		t.Fatalf("unexpected fcm payload: %#v", fcmPayload)
 	}
+	android := message["android"].(map[string]any)
+	if android["priority"] != "HIGH" {
+		t.Fatalf("expected high-priority android FCM payload: %#v", fcmPayload)
+	}
+	if _, ok := message["notification"]; ok {
+		t.Fatalf("android call pushes must be data-only so the native FirebaseMessagingService handles background calls: %#v", fcmPayload)
+	}
 }
 
 func TestRetryEventuallySucceeds(t *testing.T) {

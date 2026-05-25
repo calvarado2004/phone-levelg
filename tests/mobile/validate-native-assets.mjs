@@ -16,6 +16,7 @@ const androidManifest = readFileSync("apps/mobile/android/app/src/main/AndroidMa
 const androidIncomingCallActivity = readFileSync("apps/mobile/android/app/src/main/java/io/levelg/phone/IncomingCallActivity.kt", "utf8");
 const androidCallNotifications = readFileSync("apps/mobile/android/app/src/main/java/io/levelg/phone/AndroidCallNotifications.kt", "utf8");
 const androidCallActionReceiver = readFileSync("apps/mobile/android/app/src/main/java/io/levelg/phone/PhoneLevelGCallActionReceiver.kt", "utf8");
+const androidFirebaseMessagingService = readFileSync("apps/mobile/android/app/src/main/java/io/levelg/phone/PhoneLevelGFirebaseMessagingService.kt", "utf8");
 const androidStyles = readFileSync("apps/mobile/android/app/src/main/res/values/styles.xml", "utf8");
 const adaptiveIcon = readFileSync("apps/mobile/android/app/src/main/res/drawable/ic_launcher_foreground.xml", "utf8");
 const androidIcon = readFileSync("apps/mobile/android/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml", "utf8");
@@ -24,6 +25,7 @@ assert.match(gradleWrapper, /gradle-8\.14\.3-bin\.zip/, "Android Gradle wrapper 
 assert.match(settingsGradle, /NODE_BINARY/, "settings.gradle must support NODE_BINARY for Android Studio GUI launches");
 assert.match(appBuildGradle, /NODE_BINARY/, "app/build.gradle must support NODE_BINARY for Android Studio GUI launches");
 assert.match(appBuildGradle, /applicationId 'io\.levelg\.phone'/, "Android package id must stay stable");
+assert.match(appBuildGradle, /com\.google\.firebase:firebase-messaging:25\.0\.1/, "Android app sources must compile against Firebase Messaging for native call pushes");
 assert.match(podfile, /use_expo_modules!/, "iOS Podfile must include Expo modules");
 assert.match(infoPlist, /NSCameraUsageDescription/, "iOS must declare camera usage for video calls");
 assert.match(infoPlist, /NSMicrophoneUsageDescription/, "iOS must declare microphone usage for calls");
@@ -114,9 +116,15 @@ assert.match(appTsx, /fullScreenCallingText/, "Active calls must show a phone-st
 assert.match(appTsx, /fullScreenLocalVideoFrame/, "Video calls must include a bottom-right local camera preview");
 assert.match(androidNetworkSecurityConfig, /<base-config cleartextTrafficPermitted="true" \/>/, "Android release builds must allow private-network cleartext hosts, including Pod and emulator IP ranges");
 assert.match(androidManifest, /USE_FULL_SCREEN_INTENT/, "Android must request full-screen call notification permission");
+assert.match(androidManifest, /ExpoFirebaseMessagingService" tools:node="remove"/, "Android must replace Expo's default FirebaseMessagingService with the Phone LevelG service");
+assert.match(androidManifest, /PhoneLevelGFirebaseMessagingService[\s\S]*com\.google\.firebase\.MESSAGING_EVENT/, "Android must register the Phone LevelG FCM service for background data messages");
 assert.match(androidManifest, /IncomingCallActivity[\s\S]*showOnLockScreen="true"[\s\S]*turnScreenOn="true"/, "Android must register a lock-screen incoming call activity");
 assert.match(androidManifest, /PhoneLevelGCallActionReceiver/, "Android must register native call action receiver");
 assert.match(androidStyles, /Theme\.PhoneLevelG\.IncomingCall[\s\S]*windowNoTitle[\s\S]*windowActionBar/, "Android incoming call activity must use a dedicated no-action-bar call theme");
+assert.match(androidFirebaseMessagingService, /class PhoneLevelGFirebaseMessagingService : ExpoFirebaseMessagingService/, "Android FCM service must preserve Expo notification behavior for non-call pushes");
+assert.match(androidFirebaseMessagingService, /data\["type"\] != "call:ring"/, "Android FCM service must only intercept call:ring data messages");
+assert.match(androidFirebaseMessagingService, /AndroidCallNotifications\.showIncomingCall/, "Android FCM service must invoke the native full-screen call notification");
+assert.match(androidFirebaseMessagingService, /isExpired\(data\[AndroidCallNotifications\.EXTRA_EXPIRES_AT\]\)/, "Android FCM service must ignore expired call pushes");
 assert.match(androidCallNotifications, /setFullScreenIntent\(fullScreenIntent, true\)/, "Android incoming calls must request full-screen notification UI");
 assert.match(androidCallNotifications, /CATEGORY_CALL/, "Android incoming call notifications must use the call category");
 assert.match(androidCallNotifications, /R\.raw\.rockstar/, "Android native call notifications must reuse the rockstar ringtone");

@@ -16,6 +16,7 @@ object AndroidCallNotifications {
   const val ACTION_DECLINE = "io.levelg.phone.DECLINE_CALL"
   const val EXTRA_CALL_ID = "callId"
   const val EXTRA_ROOM_ID = "roomId"
+  const val EXTRA_SENDER_ID = "senderId"
   const val EXTRA_SENDER = "sender"
   const val EXTRA_MODE = "mode"
   const val EXTRA_EXPIRES_AT = "expiresAt"

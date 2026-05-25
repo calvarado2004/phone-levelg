@@ -33,6 +33,7 @@ class PhoneLevelGCallActionReceiver : BroadcastReceiver() {
     return listOf(
       AndroidCallNotifications.EXTRA_CALL_ID,
       AndroidCallNotifications.EXTRA_ROOM_ID,
+      AndroidCallNotifications.EXTRA_SENDER_ID,
       AndroidCallNotifications.EXTRA_SENDER,
       AndroidCallNotifications.EXTRA_MODE,
       AndroidCallNotifications.EXTRA_EXPIRES_AT

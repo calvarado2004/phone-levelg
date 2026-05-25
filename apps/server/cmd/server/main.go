@@ -1188,10 +1188,6 @@ func fcmCallPayload(payload callPushPayload, token string) map[string]any {
 			"android": map[string]any{
 				"priority": "HIGH",
 			},
-			"notification": map[string]string{
-				"title": callPushTitle(payload.Mode),
-				"body":  payload.Sender + " is calling",
-			},
 		},
 	}
 }
