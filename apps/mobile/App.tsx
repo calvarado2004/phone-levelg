@@ -251,7 +251,15 @@ export default function App() {
   const [remoteParticipantCount, setRemoteParticipantCount] = useState(0);
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
   const [unreadRoomIDs, setUnreadRoomIDs] = useState<string[]>([]);
-  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(null);
+  const [incomingCall, setIncomingCall] = useState<IncomingCall | null>(() => E2E_MODE && e2eScreen === "incoming" ? {
+    callUUID: createCallUUID(),
+    callId: "e2e-incoming-call",
+    roomId: directRoomID("ana", "e2e-user"),
+    senderId: "ana",
+    sender: "Ana",
+    mode: "video",
+    expiresAt: new Date(Date.now() + CALL_RING_TIMEOUT_MS).toISOString()
+  } : null);
   const [callMode, setCallMode] = useState<"voice" | "video">("voice");
   const [callPeer, setCallPeer] = useState<CallPeer | null>(null);
   const [localVideoTrack, setLocalVideoTrack] = useState<LiveKitVideoTrack | undefined>();
@@ -1565,10 +1573,10 @@ export default function App() {
               <Text style={styles.incomingHint}>Phone LevelG</Text>
             </View>
             <View style={styles.incomingActions}>
-              <Pressable style={[styles.callActionButton, styles.declineButton]} onPress={() => void declineIncomingCall()}>
+              <Pressable accessibilityLabel="Decline incoming call" style={[styles.callActionButton, styles.declineButton]} onPress={() => void declineIncomingCall()}>
                 <PhoneOff color="#ffffff" size={24} />
               </Pressable>
-              <Pressable style={[styles.callActionButton, styles.acceptButton]} onPress={acceptIncomingCall}>
+              <Pressable accessibilityLabel="Answer incoming call" style={[styles.callActionButton, styles.acceptButton]} onPress={acceptIncomingCall}>
                 <Phone color="#ffffff" size={24} />
               </Pressable>
             </View>

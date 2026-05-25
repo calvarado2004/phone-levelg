@@ -133,6 +133,9 @@ assert.match(appTsx, /onPress=\{\(\) => void joinCall\("voice"\)\}/, "Voice call
 assert.match(appTsx, /onPress=\{\(\) => void joinCall\("video"\)\}/, "Video call button must invoke the call path directly");
 assert.match(appTsx, /hitSlop=\{12\}/, "Call buttons must have enlarged mobile tap targets");
 assert.match(appTsx, /setIncomingCall\(nextCall\)/, "Incoming calls must render a call UI with the ringing room");
+assert.match(appTsx, /e2eScreen === "incoming"/, "Mobile E2E tests must be able to render deterministic incoming call state");
+assert.match(appTsx, /accessibilityLabel="Decline incoming call"/, "Incoming call decline control must be accessible and testable");
+assert.match(appTsx, /accessibilityLabel="Answer incoming call"/, "Incoming call answer control must be accessible and testable");
 assert.match(appTsx, /joinCall\(nextCall\.mode, nextCall\.roomId, false\)/, "Accepting an incoming call must join the room that actually rang");
 assert.match(appTsx, /type: "call:end"/, "Call termination must be signaled to the other device");
 assert.match(appTsx, /type: "call:reject"/, "Rejected incoming calls must be signaled to the caller");

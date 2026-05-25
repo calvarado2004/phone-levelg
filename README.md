@@ -225,6 +225,10 @@ Emulator/simulator API defaults point at the laptop-local Docker Compose stack:
 
 Always install release builds on Android emulators, Android devices, iOS simulators, and iOS devices. Debug builds should be reserved for Metro or native tooling work.
 
+### iOS Push Provisioning
+
+Real iPhone background call delivery requires Apple Push Notification service entitlement support. Use a paid Apple Developer Program team, create or update the explicit App ID `io.levelg.phone`, enable Push Notifications, then regenerate the development or distribution provisioning profile so it includes the `aps-environment` entitlement. Personal/free development teams cannot create the required Push Notifications profile, so Release device builds with PushKit enabled will fail signing until this is done.
+
 ### Go Backend
 
 The backend lives in `apps/server` and is built with Go 1.26.

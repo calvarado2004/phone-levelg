@@ -70,6 +70,9 @@ sequenceDiagram
 - [x] Add OpenShift secret keys for APNs and FCM without committing real credentials.
 - [x] Add deployment manifest/env wiring for APNs and FCM.
 - [x] Ensure missing push credentials fail gracefully in local development.
+- [ ] Enroll/use a paid Apple Developer Program team for `io.levelg.phone`.
+- [ ] Enable Push Notifications for the explicit `io.levelg.phone` App ID.
+- [ ] Regenerate/download an iOS development or distribution provisioning profile that contains `aps-environment`.
 
 ### iOS PushKit And CallKit
 
@@ -128,7 +131,8 @@ sequenceDiagram
 - [x] Add iOS native validation hooks for PushKit token bridging and backend registration.
 - [x] Add iOS native tests or deterministic validation hooks for PushKit/CallKit expiration.
 - [x] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
-- [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
+- [x] Add end-to-end call tests covering foreground incoming/outgoing call UI paths.
+- [ ] Add end-to-end call tests covering background and locked-device paths.
 
 ### Deployment And Validation
 
@@ -137,7 +141,7 @@ sequenceDiagram
 - [x] Deploy backend to OpenShift.
 - [x] Build iOS Release app.
 - [x] Build Android Release APK.
-- [x] Install iOS Release app on both connected iPhones.
+- [ ] Install latest iOS Release app on both connected iPhones after Push Notifications provisioning is fixed.
 - [x] Install Android Release app on emulator/device.
 - [ ] Test foreground call.
 - [ ] Test iPhone locked/background incoming call.
@@ -148,6 +152,7 @@ sequenceDiagram
 
 - iOS VoIP pushes must be used only for real calls and must report to CallKit promptly.
 - iOS registers both the regular APNs token and the PushKit VoIP token. Locked/suspended iPhone behavior still needs physical-device validation with valid APNs credentials.
+- The latest iOS release device build is blocked on Apple signing: personal development teams cannot create the Push Notifications provisioning profile required for the `aps-environment` entitlement.
 - APNs/FCM credentials must never be committed to the repository.
 - Email remains the stable user identity. Display name is presentation only.
 - Push delivery complements WebSocket signaling; it does not replace LiveKit for media.
