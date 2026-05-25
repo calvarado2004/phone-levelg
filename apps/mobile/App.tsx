@@ -269,6 +269,7 @@ export default function App() {
   const callKeepReadyRef = useRef(false);
   const incomingCallNotificationRef = useRef<string | null>(null);
   const pendingNativeAcceptRef = useRef<IncomingCallPayload | null>(null);
+  const pendingNativeDeclineRef = useRef<IncomingCallPayload | null>(null);
   const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
   const googleAuthConfigured = Boolean(GOOGLE_CLIENT_ID);
 
@@ -297,6 +298,8 @@ export default function App() {
       const nativeCall = parseNativeCallURL(url);
       if (nativeCall?.action === "accept") {
         void acceptNativeIncomingCallPayload(nativeCall.payload);
+      } else if (nativeCall?.action === "decline") {
+        void declineNativeIncomingCallPayload(nativeCall.payload);
       }
     };
     void Linking.getInitialURL().then(handleURL).catch(() => undefined);
@@ -310,6 +313,13 @@ export default function App() {
     pendingNativeAcceptRef.current = null;
     void acceptNativeIncomingCallPayload(payload);
   }, [session]);
+
+  useEffect(() => {
+    if (!session || !connected || !pendingNativeDeclineRef.current) return;
+    const payload = pendingNativeDeclineRef.current;
+    pendingNativeDeclineRef.current = null;
+    void declineNativeIncomingCallPayload(payload);
+  }, [connected, session]);
 
   useEffect(() => {
     if (!session || E2E_MODE || !supportsNativePushRegistration()) return;
@@ -582,6 +592,21 @@ export default function App() {
     await joinCall(payload.mode, payload.roomId, false);
   }
 
+  async function declineNativeIncomingCallPayload(payload: IncomingCallPayload) {
+    if (!session || socketRef.current?.readyState !== WebSocket.OPEN) {
+      pendingNativeDeclineRef.current = payload;
+      return;
+    }
+    if (payload.senderId === session.userId || isExpiredCall(payload.expiresAt)) return;
+
+    sendSocket("call:reject", { roomId: payload.roomId });
+    clearNativeCallsForPayload(payload);
+    await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
+    if (incomingCallRef.current && callMatchesPayload(incomingCallRef.current, payload)) {
+      await declineIncomingCall({ announce: false });
+    }
+  }
+
   async function endNativeCall(callUUID: string) {
     const call = nativeCallsRef.current[callUUID];
     delete nativeCallsRef.current[callUUID];
@@ -596,7 +621,7 @@ export default function App() {
         await declineIncomingCall({ announce: true });
         return;
       }
-      sendSocket("call:reject", { roomId: call.roomId });
+      await declineNativeIncomingCallPayload(call);
       clearNativeCall(call, "none");
       await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
       setCallPeer(null);
@@ -891,8 +916,9 @@ export default function App() {
   }
 
   function sendSocket(type: string, data: unknown) {
-    if (socketRef.current?.readyState !== WebSocket.OPEN) return;
+    if (socketRef.current?.readyState !== WebSocket.OPEN) return false;
     socketRef.current.send(JSON.stringify({ type, data }));
+    return true;
   }
 
   async function sendMessage(text = draft) {
@@ -1840,7 +1866,7 @@ function normalizeIncomingCallPayload(data: unknown): IncomingCallPayload | null
   return { callId, roomId, senderId, sender, mode, expiresAt };
 }
 
-function parseNativeCallURL(url: string | null): { action: "accept"; payload: IncomingCallPayload } | null {
+function parseNativeCallURL(url: string | null): { action: "accept" | "decline"; payload: IncomingCallPayload } | null {
   if (!url?.startsWith("phonelevelg://call?")) return null;
   const query = url.slice("phonelevelg://call?".length);
   const params = query.split("&").reduce<Record<string, string>>((current, part) => {
@@ -1849,11 +1875,11 @@ function parseNativeCallURL(url: string | null): { action: "accept"; payload: In
     current[decodeURIComponent(rawKey)] = decodeURIComponent(rawValue.replace(/\+/g, " "));
     return current;
   }, {});
-  if (params.action !== "accept") return null;
+  if (params.action !== "accept" && params.action !== "decline") return null;
 
   const payload = normalizeIncomingCallPayload(params);
   if (!payload) return null;
-  return { action: "accept", payload };
+  return { action: params.action, payload };
 }
 
 function isExpiredCall(expiresAt?: string) {

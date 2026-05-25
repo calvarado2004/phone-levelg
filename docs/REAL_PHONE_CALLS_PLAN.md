@@ -91,6 +91,7 @@ sequenceDiagram
 - [x] Add native full-screen incoming-call activity and notification builder.
 - [x] Show full-screen incoming-call notification from native call metadata.
 - [x] Wire native Accept and Decline notification actions.
+- [x] Route Android native Decline actions into the backend rejection path.
 - [x] Reuse `rockstar.mp3` ringtone and vibration pattern.
 - [x] Attach Firebase Messaging service to invoke native full-screen call notification from real FCM data pushes.
 - [ ] Validate on a locked Android device or emulator with Play Services.
@@ -126,7 +127,7 @@ sequenceDiagram
 - [x] Add iOS native validation hooks for PushKit registration, CallKit reporting, and CallKit event recovery.
 - [x] Add iOS native validation hooks for PushKit token bridging and backend registration.
 - [x] Add iOS native tests or deterministic validation hooks for PushKit/CallKit expiration.
-- [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
+- [x] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
 
 ### Deployment And Validation
@@ -146,7 +147,7 @@ sequenceDiagram
 ## Notes
 
 - iOS VoIP pushes must be used only for real calls and must report to CallKit promptly.
-- The first-pass iOS mobile registration stores a regular APNs notification token. PushKit VoIP token registration is still required before locked/suspended iPhone calls can be considered complete.
+- iOS registers both the regular APNs token and the PushKit VoIP token. Locked/suspended iPhone behavior still needs physical-device validation with valid APNs credentials.
 - APNs/FCM credentials must never be committed to the repository.
 - Email remains the stable user identity. Display name is presentation only.
 - Push delivery complements WebSocket signaling; it does not replace LiveKit for media.

@@ -79,6 +79,9 @@ assert.match(appTsx, /Linking\.getInitialURL\(\)/, "Android native call actions 
 assert.match(appTsx, /Linking\.addEventListener\("url"/, "Android native call actions must be consumed while the app is already running");
 assert.match(appTsx, /parseNativeCallURL/, "Mobile app must parse native call deep links into normal call payloads");
 assert.match(appTsx, /acceptNativeIncomingCallPayload/, "Mobile app must accept Android native call actions through the LiveKit join path");
+assert.match(appTsx, /declineNativeIncomingCallPayload/, "Mobile app must reject Android native declined calls through the normal signaling path");
+assert.match(appTsx, /pendingNativeDeclineRef/, "Android native declined calls must wait for websocket restoration before sending rejection");
+assert.match(appTsx, /params\.action !== "accept" && params\.action !== "decline"/, "Mobile app must parse both Android native accept and decline actions");
 assert.match(appTsx, /normalizeIncomingCallPayload/, "Mobile app must normalize websocket and native-push call payloads through one path");
 assert.match(appTsx, /isExpiredCall\(payload\.expiresAt\)/, "Mobile app must ignore expired native call pushes");
 assert.match(appTsx, /callMatchesPayload\(incomingCallRef\.current, payload\.data\)/, "Remote call end/reject must match by call id when present");
@@ -156,11 +159,13 @@ assert.match(androidFirebaseMessagingService, /class PhoneLevelGFirebaseMessagin
 assert.match(androidFirebaseMessagingService, /data\["type"\] != "call:ring"/, "Android FCM service must only intercept call:ring data messages");
 assert.match(androidFirebaseMessagingService, /AndroidCallNotifications\.showIncomingCall/, "Android FCM service must invoke the native full-screen call notification");
 assert.match(androidFirebaseMessagingService, /isExpired\(data\[AndroidCallNotifications\.EXTRA_EXPIRES_AT\]\)/, "Android FCM service must ignore expired call pushes");
+assert.match(androidFirebaseMessagingService, /if \(showNativeIncomingCall\(remoteMessage\.data\)\) \{\s*return\s*\}/, "Android call pushes must not fall through to Expo's default notification handler");
 assert.match(androidCallNotifications, /setFullScreenIntent\(fullScreenIntent, true\)/, "Android incoming calls must request full-screen notification UI");
 assert.match(androidCallNotifications, /CATEGORY_CALL/, "Android incoming call notifications must use the call category");
 assert.match(androidCallNotifications, /R\.raw\.rockstar/, "Android native call notifications must reuse the rockstar ringtone");
 assert.match(androidIncomingCallActivity, /setShowWhenLocked\(true\)/, "Android incoming call activity must show above the lock screen");
 assert.match(androidCallActionReceiver, /phonelevelg:\/\/call/, "Android accept action must route into the existing app scheme");
+assert.match(androidCallActionReceiver, /callActionIntent\(context, "decline"/, "Android decline action must route into the app so the caller is notified");
 assert.match(androidCallActionReceiver, /queryParam\("senderId"/, "Android accept action must pass sender id into the app");
 assert.match(androidCallActionReceiver, /queryParam\("sender"/, "Android accept action must pass sender display name into the app");
 assert.match(androidCallActionReceiver, /ACTION_ACCEPT/, "Android native call action receiver must support accept actions");

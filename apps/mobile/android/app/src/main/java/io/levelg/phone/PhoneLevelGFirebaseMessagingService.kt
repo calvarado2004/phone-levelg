@@ -10,7 +10,6 @@ import java.util.TimeZone
 class PhoneLevelGFirebaseMessagingService : ExpoFirebaseMessagingService() {
   override fun onMessageReceived(remoteMessage: RemoteMessage) {
     if (showNativeIncomingCall(remoteMessage.data)) {
-      super.onMessageReceived(remoteMessage)
       return
     }
 
