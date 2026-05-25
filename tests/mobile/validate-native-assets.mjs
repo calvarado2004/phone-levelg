@@ -91,7 +91,12 @@ assert.match(appTsx, /status: "Unavailable"/, "Unanswered outgoing calls must en
 assert.match(appTsx, /clearOutgoingCallTimeout\(\)/, "Outgoing call timeout must be cleared when calls connect or end");
 assert.match(appTsx, /accessibilityLabel="Log out"/, "Mobile app must expose an accessible logout button");
 assert.match(appTsx, /picture\?: string/, "Google profile photos must be read from userinfo");
-assert.match(appTsx, /avatarURL: normalizeAvatarURL\(avatarURL\)/, "Login must send the profile photo URL to the private backend");
+assert.match(appTsx, /googleAccessToken/, "Mobile login must keep the Google OAuth access token for backend verification");
+assert.match(appTsx, /googleAccessToken: nextGoogleAccessToken/, "Mobile login must send the Google OAuth access token to the private backend");
+assert.match(appTsx, /Google sign-in required/, "Production account creation must require Google sign-in");
+assert.doesNotMatch(appTsx, /placeholder="Google email"/, "Production login must not allow typed email account creation");
+assert.doesNotMatch(appTsx, /placeholder="Display name"/, "Production login must not allow typed display-name account creation");
+assert.match(appTsx, /avatarURL: nextAvatarURL/, "Login must send the verified Google profile photo URL to the private backend");
 assert.match(appTsx, /<UserAvatar displayName=\{session\.displayName\} avatarURL=\{session\.avatarURL\}/, "Header must render the current user's photo or initials");
 assert.match(appTsx, /<UserAvatar displayName=\{item\.displayName\} avatarURL=\{item\.avatarURL\}/, "Lobby members must render profile photos or initials");
 assert.match(appTsx, /Notifications\.scheduleNotificationAsync/, "Incoming calls must use platform notification audio");

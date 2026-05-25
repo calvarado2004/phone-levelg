@@ -210,12 +210,21 @@ EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=your-web-oauth-client-id
 
 The login screen keeps these pieces separate:
 
-- Google email: the stable account key.
-- Display name: presentation only.
+- Google OAuth: the only production account creation path on Android and iPhone.
+- Google email: the stable account key, read from verified Google `userinfo`.
+- Display name and profile icon: read from the Google profile.
 - Server URL: the backend to connect to, defaulting to the private OpenShift route.
 - Server secret: the backend invite code.
 
-User identity is keyed by normalized `accountEmail`, not by display name. Multiple users can share the same display name without colliding. Re-login with the same email updates the existing member row, display name, avatar URL, and `last_seen_at`.
+User identity is keyed by normalized Google `accountEmail`, not by display name. Multiple users can share the same display name without colliding. Re-login with the same Gmail account updates the existing member row, display name, avatar URL, and `last_seen_at`. One account can keep up to three physical devices registered; a direct call to that account fans out to every registered device for that email.
+
+Google OAuth release builds require platform client IDs:
+
+- `EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID`: Android OAuth client for package `io.levelg.phone`.
+- `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`: iOS OAuth client for bundle ID `io.levelg.phone`.
+- `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID`: web OAuth client for browser/dev flows.
+
+The backend verifies Google access tokens against Google `userinfo` and rejects unverified email addresses. The invite code remains the private backend admission secret after Google identity is verified.
 
 The lobby only lists members. It does not list private 1-1 rooms. Direct room IDs are derived from the two user IDs as `dm:{userA}:{userB}` with sorted IDs, so both devices address the same private conversation. Backend access checks require the requesting user to be one of those two participants before returning direct-message history or accepting direct-message writes.
 
@@ -444,17 +453,16 @@ Checks backend dependencies and returns:
 
 ### `POST /login`
 
-Creates or updates a session identity after invite-code validation. `accountEmail` is the stable account key; `displayName` is presentation-only.
+Creates or updates a session identity after Google OAuth verification and invite-code validation. `googleAccessToken` is verified against Google `userinfo`; the backend derives `accountEmail`, `displayName`, and `avatarURL` from that verified profile.
 
 ```json
 {
-  "displayName": "User",
-  "accountEmail": "user@example.com",
+  "googleAccessToken": "ya29...",
   "inviteCode": "home"
 }
 ```
 
-Two users may have the same `displayName` if their `accountEmail` values are different.
+Two users may have the same `displayName` if their verified Google email addresses are different.
 
 ### `GET /rooms/{roomID}/messages`
 

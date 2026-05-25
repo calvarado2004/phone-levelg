@@ -60,14 +60,14 @@ sequenceDiagram
 
 - [x] Add Expo AuthSession Google OAuth flow with `openid profile email` scopes.
 - [x] Read Google `userinfo` claims for verified email, display name, and profile photo.
-- [ ] Remove typed email/display-name account creation from Android and iPhone release UI.
-- [ ] Send the Google OAuth access token to the backend login endpoint.
-- [ ] Make the backend derive `accountEmail`, `displayName`, and `avatarURL` from Google `userinfo` when a Google token is supplied.
-- [ ] Reject login when Google does not return a verified email.
-- [ ] Keep the invite code as the private-server admission secret after Google identity is verified.
-- [ ] Add backend tests for verified Google-token login, unverified email rejection, and same-Gmail multi-device login.
-- [ ] Add mobile validation that Google login is the only production account creation path.
-- [ ] Document Google OAuth client IDs for Android and iOS release builds.
+- [x] Remove typed email/display-name account creation from Android and iPhone release UI.
+- [x] Send the Google OAuth access token to the backend login endpoint.
+- [x] Make the backend derive `accountEmail`, `displayName`, and `avatarURL` from Google `userinfo` when a Google token is supplied.
+- [x] Reject login when Google does not return a verified email.
+- [x] Keep the invite code as the private-server admission secret after Google identity is verified.
+- [x] Add backend tests for verified Google-token login, unverified email rejection, and same-Gmail multi-device login.
+- [x] Add mobile validation that Google login is the only production account creation path.
+- [x] Document Google OAuth client IDs for Android and iOS release builds.
 
 ### Backend Call Push Dispatch
 

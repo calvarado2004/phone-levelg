@@ -48,6 +48,7 @@ type config struct {
 	fcmAccessToken    string
 	fcmServiceAccount string
 	fcmEndpoint       string
+	googleUserInfoURL string
 }
 
 type server struct {
@@ -59,10 +60,11 @@ type server struct {
 }
 
 type loginRequest struct {
-	DisplayName  string `json:"displayName"`
-	AccountEmail string `json:"accountEmail"`
-	AvatarURL    string `json:"avatarURL"`
-	InviteCode   string `json:"inviteCode"`
+	DisplayName       string `json:"displayName"`
+	AccountEmail      string `json:"accountEmail"`
+	AvatarURL         string `json:"avatarURL"`
+	GoogleAccessToken string `json:"googleAccessToken"`
+	InviteCode        string `json:"inviteCode"`
 }
 
 type loginResponse struct {
@@ -70,6 +72,13 @@ type loginResponse struct {
 	DisplayName  string `json:"displayName"`
 	AccountEmail string `json:"accountEmail"`
 	AvatarURL    string `json:"avatarURL,omitempty"`
+}
+
+type googleUserInfo struct {
+	Email         string `json:"email"`
+	EmailVerified bool   `json:"email_verified"`
+	Name          string `json:"name"`
+	Picture       string `json:"picture"`
 }
 
 type member struct {
@@ -576,6 +585,7 @@ func loadConfig() config {
 		fcmAccessToken:    env("FCM_ACCESS_TOKEN", ""),
 		fcmServiceAccount: env("FCM_SERVICE_ACCOUNT_JSON", ""),
 		fcmEndpoint:       env("FCM_ENDPOINT", ""),
+		googleUserInfoURL: env("GOOGLE_USERINFO_URL", "https://www.googleapis.com/oauth2/v3/userinfo"),
 	}
 }
 
@@ -729,7 +739,23 @@ func (s *server) login(w http.ResponseWriter, r *http.Request) {
 	req.DisplayName = strings.TrimSpace(req.DisplayName)
 	req.AccountEmail = strings.ToLower(strings.TrimSpace(req.AccountEmail))
 	req.AvatarURL = normalizeAvatarURL(req.AvatarURL)
+	req.GoogleAccessToken = strings.TrimSpace(req.GoogleAccessToken)
 	req.InviteCode = strings.TrimSpace(req.InviteCode)
+
+	if req.GoogleAccessToken != "" {
+		profile, err := s.googleUserInfo(r.Context(), req.GoogleAccessToken)
+		if err != nil {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "google identity rejected"})
+			return
+		}
+		req.AccountEmail = strings.ToLower(strings.TrimSpace(profile.Email))
+		req.DisplayName = strings.TrimSpace(profile.Name)
+		req.AvatarURL = normalizeAvatarURL(profile.Picture)
+		if req.DisplayName == "" && req.AccountEmail != "" {
+			req.DisplayName = strings.Split(req.AccountEmail, "@")[0]
+		}
+	}
+
 	if req.DisplayName == "" ||
 		len(req.DisplayName) > 40 ||
 		req.AccountEmail == "" ||
@@ -756,6 +782,42 @@ returning id`, userID, req.DisplayName, req.AvatarURL).Scan(&userID)
 	}
 
 	writeJSON(w, http.StatusOK, loginResponse{UserID: userID, DisplayName: req.DisplayName, AccountEmail: req.AccountEmail, AvatarURL: req.AvatarURL})
+}
+
+func (s *server) googleUserInfo(ctx context.Context, accessToken string) (googleUserInfo, error) {
+	if accessToken == "" {
+		return googleUserInfo{}, errors.New("missing google access token")
+	}
+	endpoint := strings.TrimSpace(s.cfg.googleUserInfoURL)
+	if endpoint == "" {
+		endpoint = "https://www.googleapis.com/oauth2/v3/userinfo"
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return googleUserInfo{}, err
+	}
+	req.Header.Set("authorization", "Bearer "+accessToken)
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return googleUserInfo{}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return googleUserInfo{}, fmt.Errorf("google userinfo returned %s", resp.Status)
+	}
+	var profile googleUserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&profile); err != nil {
+		return googleUserInfo{}, err
+	}
+	profile.Email = strings.ToLower(strings.TrimSpace(profile.Email))
+	profile.Name = strings.TrimSpace(profile.Name)
+	profile.Picture = normalizeAvatarURL(profile.Picture)
+	if profile.Email == "" || !strings.Contains(profile.Email, "@") || !profile.EmailVerified {
+		return googleUserInfo{}, errors.New("google account email is not verified")
+	}
+	return profile, nil
 }
 
 func (s *server) members(w http.ResponseWriter, r *http.Request) {

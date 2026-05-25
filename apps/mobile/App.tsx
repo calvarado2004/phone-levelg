@@ -228,6 +228,7 @@ export default function App() {
   const [displayName, setDisplayName] = useState("");
   const [accountEmail, setAccountEmail] = useState("");
   const [avatarURL, setAvatarURL] = useState("");
+  const [googleAccessToken, setGoogleAccessToken] = useState("");
   const [serverURL, setServerURL] = useState(DEFAULT_API_URL);
   const [inviteCode, setInviteCode] = useState("home");
   const [messages, setMessages] = useState<Message[]>(() => E2E_MODE && e2eScreen !== "login" ? [
@@ -754,8 +755,16 @@ export default function App() {
       return;
     }
 
-    void loadGoogleAccount(accessToken);
+    void completeGoogleSignIn(accessToken);
   }, [googleResponse]);
+
+  async function completeGoogleSignIn(accessToken: string) {
+    const profile = await loadGoogleAccount(accessToken);
+    if (!profile) return;
+
+    setGoogleAccessToken(accessToken);
+    await login(accessToken, profile);
+  }
 
   async function loadGoogleAccount(accessToken: string) {
     try {
@@ -770,14 +779,20 @@ export default function App() {
       const email = profile.email?.trim().toLowerCase();
       if (!email || profile.email_verified === false) {
         Alert.alert("Google sign-in failed", "Use a verified Google email account.");
-        return;
+        return null;
       }
 
       setAccountEmail(email);
       setAvatarURL(normalizeAvatarURL(profile.picture ?? ""));
       setDisplayName(current => current.trim() || profile.name?.trim() || email.split("@")[0]);
+      return {
+        email,
+        name: profile.name?.trim() || email.split("@")[0],
+        picture: normalizeAvatarURL(profile.picture ?? "")
+      };
     } catch {
       Alert.alert("Google sign-in failed", "Could not read the Google account email.");
+      return null;
     }
   }
 
@@ -938,18 +953,19 @@ export default function App() {
     return () => clearInterval(intervalID);
   }, [activeRoomID, apiURL, selectedMember, session]);
 
-  async function login() {
-    const nextAccountEmail = accountEmail.trim().toLowerCase();
-    const nextDisplayName = (displayName.trim() || nextAccountEmail.split("@")[0] || "LevelG").slice(0, 40);
+  async function login(nextGoogleAccessToken = googleAccessToken, googleProfile?: { email: string; name: string; picture: string }) {
+    const nextAccountEmail = (googleProfile?.email ?? accountEmail).trim().toLowerCase();
+    const nextDisplayName = ((googleProfile?.name ?? displayName).trim() || nextAccountEmail.split("@")[0] || "LevelG").slice(0, 40);
+    const nextAvatarURL = normalizeAvatarURL(googleProfile?.picture ?? avatarURL);
 
     if (E2E_MODE) {
-      setSession({ userId: "e2e-user", displayName: nextDisplayName || "Carlos", accountEmail: nextAccountEmail || "carlos@example.test", avatarURL });
+      setSession({ userId: "e2e-user", displayName: nextDisplayName || "Carlos", accountEmail: nextAccountEmail || "carlos@example.test", avatarURL: nextAvatarURL });
       setConnected(true);
       return;
     }
 
-    if (!nextAccountEmail || !nextAccountEmail.includes("@")) {
-      Alert.alert("Google email required", "Sign in with Google or enter the Google email for this account.");
+    if (!nextGoogleAccessToken) {
+      Alert.alert("Google sign-in required", "Use Google to create or restore the account on this device.");
       return;
     }
 
@@ -957,7 +973,13 @@ export default function App() {
       const response = await fetch(`${apiURL}/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ displayName: nextDisplayName, accountEmail: nextAccountEmail, avatarURL: normalizeAvatarURL(avatarURL), inviteCode })
+        body: JSON.stringify({
+          displayName: nextDisplayName,
+          accountEmail: nextAccountEmail,
+          avatarURL: nextAvatarURL,
+          googleAccessToken: nextGoogleAccessToken,
+          inviteCode
+        })
       });
 
       if (!response.ok) {
@@ -1478,24 +1500,6 @@ export default function App() {
             </View>
           )}
           <TextInput
-            value={accountEmail}
-            onChangeText={setAccountEmail}
-            placeholder="Google email"
-            placeholderTextColor="#7c8794"
-            autoCapitalize="none"
-            autoCorrect={false}
-            keyboardType="email-address"
-            style={styles.input}
-          />
-          <TextInput
-            value={displayName}
-            onChangeText={setDisplayName}
-            placeholder="Display name"
-            placeholderTextColor="#7c8794"
-            autoCapitalize="words"
-            style={styles.input}
-          />
-          <TextInput
             value={serverURL}
             onChangeText={setServerURL}
             placeholder="Server URL"
@@ -1513,12 +1517,12 @@ export default function App() {
             autoCapitalize="none"
             autoCorrect={false}
             returnKeyType="go"
-            onSubmitEditing={login}
+            onSubmitEditing={() => void login()}
             secureTextEntry
             style={styles.input}
           />
-          <Text style={styles.loginHint}>Default server: OpenShift. The Google email identifies the account; the server URL and secret choose the private backend.</Text>
-          <Pressable style={styles.primaryButton} onPress={login}>
+          <Text style={styles.loginHint}>Default server: OpenShift. Google creates the account; the server URL and secret choose the private backend.</Text>
+          <Pressable style={styles.primaryButton} onPress={() => void login()}>
             <Text style={styles.primaryButtonText}>Connect</Text>
           </Pressable>
         </View>

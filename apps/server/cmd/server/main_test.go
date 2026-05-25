@@ -412,6 +412,96 @@ func TestIntegrationLoginReusesSameEmailAccount(t *testing.T) {
 	}
 }
 
+func TestIntegrationLoginUsesVerifiedGoogleIdentity(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	var authorization string
+	googleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorization = r.Header.Get("authorization")
+		writeJSON(w, http.StatusOK, googleUserInfo{
+			Email:         "Carlos@Example.com",
+			EmailVerified: true,
+			Name:          "Carlos Google",
+			Picture:       "https://example.com/carlos.png",
+		})
+	}))
+	defer googleServer.Close()
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home", googleUserInfoURL: googleServer.URL},
+		db:  db,
+	}
+	session := loginForTest(t, app, loginRequest{
+		DisplayName:       "Ignored",
+		AccountEmail:      "ignored@example.com",
+		GoogleAccessToken: "google-token",
+		InviteCode:        "home",
+	})
+
+	if authorization != "Bearer google-token" {
+		t.Fatalf("expected bearer token forwarded to Google, got %q", authorization)
+	}
+	if session.UserID != "carlos@example.com" || session.AccountEmail != "carlos@example.com" || session.DisplayName != "Carlos Google" || session.AvatarURL != "https://example.com/carlos.png" {
+		t.Fatalf("expected verified Google identity to drive login, got %#v", session)
+	}
+}
+
+func TestIntegrationLoginRejectsUnverifiedGoogleEmail(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	if databaseURL == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	googleServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, googleUserInfo{
+			Email:         "carlos@example.com",
+			EmailVerified: false,
+			Name:          "Carlos Google",
+		})
+	}))
+	defer googleServer.Close()
+
+	app := &server{
+		cfg: config{sharedInviteCode: "home", googleUserInfoURL: googleServer.URL},
+		db:  db,
+	}
+	body, _ := json.Marshal(loginRequest{GoogleAccessToken: "google-token", InviteCode: "home"})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	app.login(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected unverified Google email to be rejected, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestIntegrationDeviceRegistrationUsesEmailBackedUser(t *testing.T) {
 	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
 	if databaseURL == "" {
