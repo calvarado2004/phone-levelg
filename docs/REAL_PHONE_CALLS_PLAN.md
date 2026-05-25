@@ -60,7 +60,7 @@ sequenceDiagram
 - [x] Send native push to every registered recipient device through a provider abstraction.
 - [x] Do not send push back to caller devices.
 - [x] Add tests that `call:ring` dispatches both WebSocket and native push work.
-- [ ] Persist call attempts for retry/audit.
+- [x] Persist call attempts for retry/audit.
 - [ ] Attach concrete APNs and FCM provider implementations.
 
 ### Push Providers And Secrets
@@ -110,6 +110,7 @@ sequenceDiagram
 - [x] Add backend integration tests for device registration, token update, and logout delete.
 - [x] Add backend unit coverage for rejecting invalid device registration payloads.
 - [x] Add backend integration tests for call IDs, expiration, recipient resolution, and push fan-out.
+- [x] Add backend integration tests for persisted call attempts and target device rows.
 - [x] Add native project validation for mobile push-token registration wiring.
 - [ ] Add backend tests for missing APNs/FCM credentials graceful behavior.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.

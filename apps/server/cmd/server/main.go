@@ -285,6 +285,29 @@ create table if not exists devices (
 create index if not exists devices_user_id_idx on devices(user_id);
 create unique index if not exists devices_platform_push_token_idx on devices(platform, push_token);
 
+create table if not exists call_attempts (
+  call_id text primary key,
+  room_id text not null,
+  sender_id text not null,
+  sender_name text not null,
+  mode text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now(),
+  constraint call_attempts_mode_check check (mode in ('voice', 'video'))
+);
+
+create table if not exists call_attempt_devices (
+  call_id text not null references call_attempts(call_id) on delete cascade,
+  device_id text not null,
+  recipient_user_id text not null,
+  platform text not null,
+  push_token_type text not null,
+  status text not null default 'pending',
+  created_at timestamptz not null default now(),
+  primary key (call_id, device_id)
+);
+create index if not exists call_attempt_devices_recipient_idx on call_attempt_devices(recipient_user_id, created_at desc);
+
 with ranked_users as (
   select id,
          display_name,
@@ -796,7 +819,9 @@ func (s *server) dispatchNativeCallPush(ctx context.Context, roomID, senderID st
 	if dispatcher == nil {
 		dispatcher = noopPushDispatcher{}
 	}
-	devices := s.pushDevicesForRecipients(ctx, s.callRecipients(ctx, roomID, senderID))
+	recipients := s.callRecipients(ctx, roomID, senderID)
+	devices := s.pushDevicesForRecipients(ctx, recipients)
+	s.storeCallAttempt(ctx, payload, devices)
 	if len(devices) == 0 {
 		return
 	}
@@ -856,6 +881,45 @@ order by user_id, device_id`, recipients)
 		}
 	}
 	return devices
+}
+
+func (s *server) storeCallAttempt(ctx context.Context, payload callPushPayload, devices []pushDevice) {
+	if s.db == nil {
+		return
+	}
+
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		slog.Error("begin call attempt", "error", err)
+		return
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
+insert into call_attempts (call_id, room_id, sender_id, sender_name, mode, expires_at)
+values ($1, $2, $3, $4, $5, $6)
+on conflict (call_id) do nothing`,
+		payload.CallID, payload.RoomID, payload.SenderID, payload.Sender, payload.Mode, payload.ExpiresAt)
+	if err != nil {
+		slog.Error("store call attempt", "error", err)
+		return
+	}
+
+	for _, device := range devices {
+		_, err = tx.Exec(ctx, `
+insert into call_attempt_devices (call_id, device_id, recipient_user_id, platform, push_token_type)
+values ($1, $2, $3, $4, $5)
+on conflict (call_id, device_id) do nothing`,
+			payload.CallID, device.DeviceID, device.UserID, device.Platform, device.PushTokenType)
+		if err != nil {
+			slog.Error("store call attempt device", "error", err)
+			return
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("commit call attempt", "error", err)
+	}
 }
 
 func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, senderID, sender, text string) (message, bool) {

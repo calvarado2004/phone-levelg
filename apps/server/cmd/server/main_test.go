@@ -740,6 +740,19 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	if len(pushCall.devices) != 1 || pushCall.devices[0].UserID != "bob" || pushCall.devices[0].PushToken != "bob-token" {
 		t.Fatalf("expected only bob device push, got %#v", pushCall.devices)
 	}
+	var callAttemptCount, callAttemptDeviceCount int
+	if err := db.QueryRow(ctx, `select count(*) from call_attempts where call_id = $1 and room_id = $2 and sender_id = 'alice'`, ringPayload.CallID, aliceRoomID).Scan(&callAttemptCount); err != nil {
+		t.Fatalf("query call attempts: %v", err)
+	}
+	if callAttemptCount != 1 {
+		t.Fatalf("expected persisted call attempt, got %d", callAttemptCount)
+	}
+	if err := db.QueryRow(ctx, `select count(*) from call_attempt_devices where call_id = $1 and recipient_user_id = 'bob' and device_id = 'bob-phone'`, ringPayload.CallID).Scan(&callAttemptDeviceCount); err != nil {
+		t.Fatalf("query call attempt devices: %v", err)
+	}
+	if callAttemptDeviceCount != 1 {
+		t.Fatalf("expected persisted call attempt device, got %d", callAttemptDeviceCount)
+	}
 
 	if err := charlie.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 		t.Fatalf("set charlie deadline: %v", err)
@@ -894,7 +907,7 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 
 func resetIntegrationState(t *testing.T, ctx context.Context, db *pgxpool.Pool) {
 	t.Helper()
-	if _, err := db.Exec(ctx, `truncate table messages, users cascade`); err != nil {
+	if _, err := db.Exec(ctx, `truncate table call_attempts, messages, users cascade`); err != nil {
 		t.Fatalf("reset integration state: %v", err)
 	}
 }
