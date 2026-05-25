@@ -228,7 +228,7 @@ It provides:
 - contact icon and `Calling <contact-name>` header during calls
 - bottom-right self camera preview during video calls
 - Android FCM call pushes through a native Firebase Messaging service
-- iOS PushKit/CallKit call pushes once Apple provisioning is active
+- iOS PushKit/CallKit call pushes through the paid Apple Developer team
 - native Android and iOS projects for IDE/device builds
 
 Encrypted picture attachments require native photo-library permissions. iOS declares `NSPhotoLibraryUsageDescription`; Android declares `READ_MEDIA_IMAGES` for modern devices and keeps `READ_EXTERNAL_STORAGE` for Android 12 and older. Photo and document pickers request platform-provided base64 bytes first, then fall back to readable app-cache/content URIs before local encryption. Document attachments use the platform document picker and do not expose readable file contents to the backend.
@@ -357,7 +357,7 @@ oc -n phone-levelg set env deployment/phone-levelg-server FCM_SERVICE_ACCOUNT_JS
 
 ### iOS Push Provisioning
 
-Real iPhone background call delivery requires Apple Push Notification service entitlement support. Use a paid Apple Developer Program team, create or update the explicit App ID `io.levelg.phone`, enable Push Notifications, then regenerate the development or distribution provisioning profile so it includes the `aps-environment` entitlement. Personal/free development teams cannot create the required Push Notifications profile, so Release device builds with PushKit enabled will fail signing until this is done.
+Real iPhone background call delivery requires Apple Push Notification service entitlement support. Phone LevelG now uses the paid Apple Developer team for `io.levelg.phone`; keep the explicit App ID configured with Push Notifications enabled and keep development/distribution provisioning profiles regenerated when entitlements or devices change so they include `aps-environment`. Personal/free development teams still cannot create the required Push Notifications profile.
 
 ### Android Push Provisioning
 
@@ -422,7 +422,7 @@ The OpenShift service receives a MetalLB IP from the libvirt network. The host r
 
 The app/backend integration point is already present: the backend issues LiveKit JWTs from `/calls/token`.
 
-Native full-screen incoming-call plumbing is implemented through APNs/PushKit/CallKit on iOS and FCM high-priority data messages plus an Android full-screen call activity. Android still requires real Firebase configuration and OpenShift FCM credentials before background calls can work. iOS device release deployment is pending Apple Developer Program activation and Push Notifications provisioning for `io.levelg.phone`.
+Native full-screen incoming-call plumbing is implemented through APNs/PushKit/CallKit on iOS and FCM high-priority data messages plus an Android full-screen call activity. iOS release builds now install on physical devices through the paid Apple Developer team. Android still requires real Firebase configuration and OpenShift FCM credentials before background calls can work.
 
 ## Local Development
 
