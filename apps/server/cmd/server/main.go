@@ -35,6 +35,7 @@ type server struct {
 	db       *pgxpool.Pool
 	redis    *redis.Client
 	upgrader websocket.Upgrader
+	push     pushDispatcher
 }
 
 type loginRequest struct {
@@ -84,6 +85,33 @@ type deviceRegistrationResponse struct {
 	PushTokenType string    `json:"pushTokenType"`
 	AppVersion    string    `json:"appVersion,omitempty"`
 	LastSeenAt    time.Time `json:"lastSeenAt"`
+}
+
+type pushDevice struct {
+	DeviceID      string
+	UserID        string
+	Platform      string
+	PushToken     string
+	PushTokenType string
+}
+
+type callPushPayload struct {
+	CallID    string    `json:"callId"`
+	RoomID    string    `json:"roomId"`
+	SenderID  string    `json:"senderId"`
+	Sender    string    `json:"sender"`
+	Mode      string    `json:"mode"`
+	ExpiresAt time.Time `json:"expiresAt"`
+}
+
+type pushDispatcher interface {
+	DispatchCallPush(context.Context, callPushPayload, []pushDevice) error
+}
+
+type noopPushDispatcher struct{}
+
+func (noopPushDispatcher) DispatchCallPush(context.Context, callPushPayload, []pushDevice) error {
+	return nil
 }
 
 type callTokenRequest struct {
@@ -142,6 +170,7 @@ func main() {
 		cfg:   cfg,
 		db:    db,
 		redis: rdb,
+		push:  noopPushDispatcher{},
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return cfg.corsOrigin == "*" || r.Header.Get("Origin") == cfg.corsOrigin
@@ -696,16 +725,20 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 			if body.Mode != "video" {
 				body.Mode = "voice"
 			}
+			payload := callPushPayload{
+				CallID:    randomID(),
+				RoomID:    targetRoomID,
+				SenderID:  userID,
+				Sender:    displayName,
+				Mode:      body.Mode,
+				ExpiresAt: time.Now().UTC().Add(45 * time.Second),
+			}
 			envelope := outboundEnvelope{
 				Type: "call:ring",
-				Data: map[string]string{
-					"roomId":   targetRoomID,
-					"senderId": userID,
-					"sender":   displayName,
-					"mode":     body.Mode,
-				},
+				Data: payload,
 			}
 			s.publishCallEvent(ctx, targetRoomID, userID, envelope)
+			s.dispatchNativeCallPush(ctx, targetRoomID, userID, payload)
 		case "call:end":
 			var body struct {
 				RoomID string `json:"roomId"`
@@ -753,21 +786,36 @@ func (s *server) websocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) publishCallEvent(ctx context.Context, roomID, senderID string, envelope outboundEnvelope) {
-	if recipients := directMessageRecipients(roomID); len(recipients) > 0 {
-		for _, recipient := range recipients {
-			if recipient != senderID {
-				s.publish(ctx, "user:"+recipient, envelope)
-			}
-		}
-		return
-	}
-
-	for _, recipient := range s.callRingRecipients(ctx, senderID) {
+	for _, recipient := range s.callRecipients(ctx, roomID, senderID) {
 		s.publish(ctx, "user:"+recipient, envelope)
 	}
 }
 
-func (s *server) callRingRecipients(ctx context.Context, senderID string) []string {
+func (s *server) dispatchNativeCallPush(ctx context.Context, roomID, senderID string, payload callPushPayload) {
+	dispatcher := s.push
+	if dispatcher == nil {
+		dispatcher = noopPushDispatcher{}
+	}
+	devices := s.pushDevicesForRecipients(ctx, s.callRecipients(ctx, roomID, senderID))
+	if len(devices) == 0 {
+		return
+	}
+	if err := dispatcher.DispatchCallPush(ctx, payload, devices); err != nil {
+		slog.Error("dispatch call push", "error", err)
+	}
+}
+
+func (s *server) callRecipients(ctx context.Context, roomID, senderID string) []string {
+	if recipients := directMessageRecipients(roomID); len(recipients) > 0 {
+		filtered := make([]string, 0, len(recipients))
+		for _, recipient := range recipients {
+			if recipient != senderID {
+				filtered = append(filtered, recipient)
+			}
+		}
+		return filtered
+	}
+
 	rows, err := s.db.Query(ctx, `select id from users where id <> $1`, senderID)
 	if err != nil {
 		return nil
@@ -782,6 +830,32 @@ func (s *server) callRingRecipients(ctx context.Context, senderID string) []stri
 		}
 	}
 	return recipients
+}
+
+func (s *server) pushDevicesForRecipients(ctx context.Context, recipients []string) []pushDevice {
+	if len(recipients) == 0 {
+		return nil
+	}
+
+	rows, err := s.db.Query(ctx, `
+select device_id, user_id, platform, push_token, push_token_type
+from devices
+where user_id = any($1)
+order by user_id, device_id`, recipients)
+	if err != nil {
+		slog.Error("load push devices", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	devices := make([]pushDevice, 0)
+	for rows.Next() {
+		var device pushDevice
+		if err := rows.Scan(&device.DeviceID, &device.UserID, &device.Platform, &device.PushToken, &device.PushTokenType); err == nil {
+			devices = append(devices, device)
+		}
+	}
+	return devices
 }
 
 func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, senderID, sender, text string) (message, bool) {

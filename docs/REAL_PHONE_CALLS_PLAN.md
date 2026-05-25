@@ -53,13 +53,15 @@ sequenceDiagram
 
 ### Backend Call Push Dispatch
 
-- [ ] Add call IDs to outgoing call attempts.
-- [ ] Add call expiration timestamp to ring payloads.
-- [ ] Resolve direct-call recipients by email-backed user id.
-- [ ] Keep WebSocket delivery as fast path for active clients.
-- [ ] Send native push to every registered recipient device.
-- [ ] Do not send push back to caller devices.
-- [ ] Add tests that `call:ring` dispatches both WebSocket and push job records.
+- [x] Add call IDs to outgoing call attempts.
+- [x] Add call expiration timestamp to ring payloads.
+- [x] Resolve direct-call recipients by email-backed user id.
+- [x] Keep WebSocket delivery as fast path for active clients.
+- [x] Send native push to every registered recipient device through a provider abstraction.
+- [x] Do not send push back to caller devices.
+- [x] Add tests that `call:ring` dispatches both WebSocket and native push work.
+- [ ] Persist call attempts for retry/audit.
+- [ ] Attach concrete APNs and FCM provider implementations.
 
 ### Push Providers And Secrets
 
@@ -107,8 +109,8 @@ sequenceDiagram
 
 - [x] Add backend integration tests for device registration, token update, and logout delete.
 - [x] Add backend unit coverage for rejecting invalid device registration payloads.
+- [x] Add backend integration tests for call IDs, expiration, recipient resolution, and push fan-out.
 - [x] Add native project validation for mobile push-token registration wiring.
-- [ ] Add backend tests for recipient resolution and push dispatch fan-out.
 - [ ] Add backend tests for missing APNs/FCM credentials graceful behavior.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
@@ -122,7 +124,7 @@ sequenceDiagram
 - [x] Build iOS Release app.
 - [x] Build Android Release APK.
 - [x] Install iOS Release app on both connected iPhones.
-- [ ] Install Android Release app on emulator/device.
+- [x] Install Android Release app on emulator/device.
 - [ ] Test foreground call.
 - [ ] Test iPhone locked/background incoming call.
 - [ ] Test Android locked/background incoming call.

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -648,12 +649,14 @@ func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
 
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	defer rdb.Close()
+	pushRecorder := &recordingPushDispatcher{}
 
 	app := &server{
 		cfg:      config{sharedInviteCode: "home"},
 		db:       db,
 		redis:    rdb,
 		upgrader: websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }},
+		push:     pushRecorder,
 	}
 	for _, item := range []member{
 		{ID: "alice", DisplayName: "Alice"},
@@ -663,6 +666,18 @@ func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
 		_, err := db.Exec(ctx, `insert into users (id, display_name) values ($1, $2)`, item.ID, item.DisplayName)
 		if err != nil {
 			t.Fatalf("insert user %s: %v", item.ID, err)
+		}
+	}
+	for _, item := range []pushDevice{
+		{DeviceID: "alice-phone", UserID: "alice", Platform: "ios", PushToken: "alice-token", PushTokenType: "apns"},
+		{DeviceID: "bob-phone", UserID: "bob", Platform: "android", PushToken: "bob-token", PushTokenType: "fcm"},
+		{DeviceID: "charlie-phone", UserID: "charlie", Platform: "ios", PushToken: "charlie-token", PushTokenType: "apns"},
+	} {
+		_, err := db.Exec(ctx, `
+insert into devices (device_id, user_id, platform, push_token, push_token_type)
+values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.PushToken, item.PushTokenType)
+		if err != nil {
+			t.Fatalf("insert device %s: %v", item.DeviceID, err)
 		}
 	}
 
@@ -702,6 +717,7 @@ func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
 		SenderID string `json:"senderId"`
 		Sender   string `json:"sender"`
 		Mode     string `json:"mode"`
+		CallID   string `json:"callId"`
 	}
 	encodedPayload, _ := json.Marshal(received.Data)
 	if err := json.Unmarshal(encodedPayload, &ringPayload); err != nil {
@@ -709,6 +725,20 @@ func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
 	}
 	if ringPayload.RoomID != aliceRoomID || ringPayload.SenderID != "alice" || ringPayload.Mode != "video" {
 		t.Fatalf("unexpected ring payload: %#v", ringPayload)
+	}
+	if ringPayload.CallID == "" {
+		t.Fatal("expected direct ring payload to include call id")
+	}
+
+	pushCall := pushRecorder.waitForCall(t, 1)[0]
+	if pushCall.payload.CallID != ringPayload.CallID || pushCall.payload.RoomID != aliceRoomID || pushCall.payload.SenderID != "alice" || pushCall.payload.Mode != "video" {
+		t.Fatalf("unexpected push payload: %#v", pushCall.payload)
+	}
+	if time.Until(pushCall.payload.ExpiresAt) <= 0 {
+		t.Fatalf("expected future push expiration, got %s", pushCall.payload.ExpiresAt)
+	}
+	if len(pushCall.devices) != 1 || pushCall.devices[0].UserID != "bob" || pushCall.devices[0].PushToken != "bob-token" {
+		t.Fatalf("expected only bob device push, got %#v", pushCall.devices)
 	}
 
 	if err := charlie.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
@@ -790,6 +820,7 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 		RoomID   string `json:"roomId"`
 		SenderID string `json:"senderId"`
 		Mode     string `json:"mode"`
+		CallID   string `json:"callId"`
 	}
 	encodedPayload, _ := json.Marshal(received.Data)
 	if err := json.Unmarshal(encodedPayload, &ringPayload); err != nil {
@@ -797,6 +828,9 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 	}
 	if ringPayload.RoomID != "home" || ringPayload.SenderID != "alice" || ringPayload.Mode != "voice" {
 		t.Fatalf("unexpected ring payload: %#v", ringPayload)
+	}
+	if ringPayload.CallID == "" {
+		t.Fatal("expected lobby ring payload to include call id")
 	}
 
 	if err := alice.WriteJSON(wsEnvelope{
@@ -916,4 +950,44 @@ func directMessageRecipientsRoom(firstID, secondID string) string {
 		recipients[0], recipients[1] = recipients[1], recipients[0]
 	}
 	return "dm:" + recipients[0] + ":" + recipients[1]
+}
+
+type recordedPushCall struct {
+	payload callPushPayload
+	devices []pushDevice
+}
+
+type recordingPushDispatcher struct {
+	mu    sync.Mutex
+	calls []recordedPushCall
+}
+
+func (r *recordingPushDispatcher) DispatchCallPush(_ context.Context, payload callPushPayload, devices []pushDevice) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	copiedDevices := append([]pushDevice(nil), devices...)
+	r.calls = append(r.calls, recordedPushCall{payload: payload, devices: copiedDevices})
+	return nil
+}
+
+func (r *recordingPushDispatcher) waitForCall(t *testing.T, count int) []recordedPushCall {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		r.mu.Lock()
+		if len(r.calls) >= count {
+			calls := append([]recordedPushCall(nil), r.calls...)
+			r.mu.Unlock()
+			return calls
+		}
+		r.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t.Fatalf("expected %d push calls, got %d", count, len(r.calls))
+	return nil
 }
