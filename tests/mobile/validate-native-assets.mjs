@@ -122,6 +122,9 @@ assert.match(appTsx, /function getNativeCallKeep\(\) \{\s*if \(Platform\.OS !== 
 assert.match(appTsx, /didDisplayIncomingCall/, "iOS app must track CallKit incoming-call payloads");
 assert.match(appTsx, /didLoadWithEvents/, "iOS app must recover delayed CallKit events after PushKit launches the app");
 assert.match(appTsx, /trackNativeCallKeepIncomingCall/, "iOS PushKit payloads must be mapped back to LiveKit call metadata");
+assert.match(appTsx, /clearNativeCallsForPayload/, "Mobile app must clear stale native call UI when calls expire or end remotely");
+assert.match(appTsx, /getNativeCallKeep\(\)\?\.endCall\(call\.callUUID\)/, "Mobile app must end stale CallKit calls instead of leaving the system call UI active");
+assert.match(appTsx, /isExpiredCall\(payload\.expiresAt\)[\s\S]*clearNativeCall\(call, "end"\)/, "Expired iOS PushKit calls must be cleared from CallKit");
 assert.match(appTsx, /accessibilityLabel=\{`Start voice call in \$\{activeRoomTitle\}`\}/, "Voice call button must be an accessible explicit Android tap target");
 assert.match(appTsx, /onPress=\{\(\) => void joinCall\("voice"\)\}/, "Voice call button must invoke the call path directly");
 assert.match(appTsx, /onPress=\{\(\) => void joinCall\("video"\)\}/, "Video call button must invoke the call path directly");

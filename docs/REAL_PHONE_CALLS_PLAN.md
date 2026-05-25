@@ -79,7 +79,7 @@ sequenceDiagram
 - [x] Immediately report incoming call through CallKit.
 - [x] Wire CallKit accept to LiveKit join.
 - [x] Wire CallKit decline/end to backend `call:reject` / `call:end`.
-- [ ] Clear stale CallKit calls on expiration or remote end.
+- [x] Clear stale CallKit calls on expiration or remote end.
 - [ ] Validate on a locked physical iPhone.
 
 ### Android FCM And Full-Screen Calls
@@ -125,7 +125,7 @@ sequenceDiagram
 - [x] Add native project validation for Android native Answer deep-link handling.
 - [x] Add iOS native validation hooks for PushKit registration, CallKit reporting, and CallKit event recovery.
 - [x] Add iOS native validation hooks for PushKit token bridging and backend registration.
-- [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit expiration.
+- [x] Add iOS native tests or deterministic validation hooks for PushKit/CallKit expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.
 

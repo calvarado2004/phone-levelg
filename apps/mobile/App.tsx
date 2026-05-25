@@ -496,7 +496,9 @@ export default function App() {
     incomingCallExpirationTimerRef.current = setTimeout(() => {
       if (incomingCallRef.current?.callId === call.callId) {
         void declineIncomingCall({ announce: false });
+        return;
       }
+      clearNativeCallsForPayload(call);
     }, delay);
   }
 
@@ -523,8 +525,8 @@ export default function App() {
   function trackNativeCallKeepIncomingCall(event: NativeCallKeepIncomingCallEvent) {
     if (event.fromPushKit !== "1" || !event.callUUID) return;
     const payload = normalizeIncomingCallPayload(event.payload);
-    if (!payload || isExpiredCall(payload.expiresAt)) return;
-    nativeCallsRef.current[event.callUUID] = {
+    if (!payload) return;
+    const call = {
       callUUID: event.callUUID,
       callId: payload.callId,
       roomId: payload.roomId,
@@ -533,7 +535,13 @@ export default function App() {
       mode: payload.mode,
       expiresAt: payload.expiresAt
     };
+    if (isExpiredCall(payload.expiresAt)) {
+      clearNativeCall(call, "end");
+      return;
+    }
+    nativeCallsRef.current[event.callUUID] = call;
     handledCallIDsRef.current.add(payload.callId);
+    scheduleIncomingCallExpiration(call);
   }
 
   async function acceptNativeIncomingCallPayload(payload: IncomingCallPayload) {
@@ -589,6 +597,7 @@ export default function App() {
         return;
       }
       sendSocket("call:reject", { roomId: call.roomId });
+      clearNativeCall(call, "none");
       await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
       setCallPeer(null);
     }
@@ -752,6 +761,7 @@ export default function App() {
         if (incomingCallRef.current && callMatchesPayload(incomingCallRef.current, payload.data)) {
           void declineIncomingCall({ announce: false });
         }
+        clearNativeCallsForPayload(payload.data);
         if (activeCallRoomIDRef.current === payload.data.roomId) {
           void endCurrentCall({ announce: false, status: "Call ended" });
         }
@@ -760,6 +770,7 @@ export default function App() {
         if (incomingCallRef.current && callMatchesPayload(incomingCallRef.current, payload.data)) {
           void declineIncomingCall({ announce: false });
         }
+        clearNativeCallsForPayload(payload.data);
         if (activeCallRoomIDRef.current === payload.data.roomId) {
           void endCurrentCall({ announce: false, status: "Call rejected" });
         }
@@ -1119,9 +1130,11 @@ export default function App() {
     if (options.announce !== false && call) {
       sendSocket("call:reject", { roomId: call.roomId });
       getNativeCallKeep()?.rejectCall(call.callUUID);
+    } else if (call) {
+      getNativeCallKeep()?.endCall(call.callUUID);
     }
     if (call) {
-      delete nativeCallsRef.current[call.callUUID];
+      clearNativeCall(call, "none");
     }
     clearIncomingCallExpirationTimer();
     await stopIncomingCallTone();
@@ -1141,6 +1154,22 @@ export default function App() {
     await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     await joinCall(nextCall.mode, nextCall.roomId, false);
     getNativeCallKeep()?.setCurrentCallActive?.(nextCall.callUUID);
+  }
+
+  function clearNativeCallsForPayload(payload: { callId?: string; roomId: string }) {
+    Object.values(nativeCallsRef.current)
+      .filter(call => callMatchesPayload(call, payload))
+      .forEach(call => clearNativeCall(call, "end"));
+  }
+
+  function clearNativeCall(call: IncomingCall, nativeAction: "end" | "reject" | "none") {
+    if (nativeAction === "end") {
+      getNativeCallKeep()?.endCall(call.callUUID);
+    }
+    if (nativeAction === "reject") {
+      getNativeCallKeep()?.rejectCall(call.callUUID);
+    }
+    delete nativeCallsRef.current[call.callUUID];
   }
 
   async function startIncomingCallTone() {
