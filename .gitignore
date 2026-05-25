@@ -10,3 +10,5 @@ apps/mobile/ios/DerivedData*/
 .DS_Store
 *.log
 .env
+apps/mobile/android/app/google-services.json
+GoogleService-Info.plist

@@ -260,6 +260,57 @@ Emulator/simulator API defaults point at the laptop-local Docker Compose stack:
 
 Always install release builds on Android emulators, Android devices, iOS simulators, and iOS devices. Debug builds should be reserved for Metro or native tooling work.
 
+### Google And Firebase Provisioning
+
+Phone LevelG uses Google OAuth for account identity and Firebase Cloud Messaging for Android background call delivery. Keep all generated config and secrets out of GitHub. This repository ignores `apps/mobile/android/app/google-services.json` and `GoogleService-Info.plist`; copy them locally only when building release apps.
+
+Required Google/Firebase setup:
+
+1. Create or select a Google Cloud/Firebase project.
+2. Enable Firebase on the project and accept Firebase terms in Firebase Console if prompted.
+3. Enable the required APIs:
+   - `firebase.googleapis.com`
+   - `identitytoolkit.googleapis.com`
+   - `fcm.googleapis.com`
+   - `serviceusage.googleapis.com`
+   - `cloudresourcemanager.googleapis.com`
+4. Configure the OAuth consent screen / Google Auth Platform in Google Cloud Console.
+5. Create Firebase app entries:
+   - Android package: `io.levelg.phone`
+   - iOS bundle ID: `io.levelg.phone`
+   - optional Web app for browser/dev OAuth flows
+6. Register Android signing fingerprints for every build key you will install:
+   - current local debug/release-test SHA-1 and SHA-256
+   - production release keystore SHA-1 and SHA-256 when created
+7. Download `google-services.json` locally to `apps/mobile/android/app/google-services.json`.
+8. Download `GoogleService-Info.plist` locally if a future native iOS Firebase integration needs it.
+9. Build mobile releases with Google OAuth client IDs supplied as environment variables, never hard-coded:
+
+```sh
+EXPO_PUBLIC_GOOGLE_ANDROID_CLIENT_ID=android-client-id.apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID=ios-client-id.apps.googleusercontent.com
+EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID=web-client-id.apps.googleusercontent.com
+```
+
+Useful CLI commands, with placeholder values only:
+
+```sh
+gcloud config set project your-project-id
+gcloud services enable firebase.googleapis.com identitytoolkit.googleapis.com fcm.googleapis.com serviceusage.googleapis.com cloudresourcemanager.googleapis.com
+
+firebase projects:addfirebase your-project-id
+firebase apps:create ANDROID "Phone LevelG Android" --package-name io.levelg.phone --project your-project-id
+firebase apps:create IOS "Phone LevelG iOS" --bundle-id io.levelg.phone --project your-project-id
+firebase apps:android:sha:create your-android-firebase-app-id YOUR_SHA1_OR_SHA256 --project your-project-id
+firebase apps:sdkconfig ANDROID your-android-firebase-app-id --project your-project-id --out apps/mobile/android/app/google-services.json
+```
+
+Android FCM server delivery also requires a Firebase service account with permission to send FCM v1 messages. Store that JSON only in OpenShift, for example:
+
+```sh
+oc -n phone-levelg set env deployment/phone-levelg-server FCM_SERVICE_ACCOUNT_JSON='paste-json-outside-git'
+```
+
 ### iOS Push Provisioning
 
 Real iPhone background call delivery requires Apple Push Notification service entitlement support. Use a paid Apple Developer Program team, create or update the explicit App ID `io.levelg.phone`, enable Push Notifications, then regenerate the development or distribution provisioning profile so it includes the `aps-environment` entitlement. Personal/free development teams cannot create the required Push Notifications profile, so Release device builds with PushKit enabled will fail signing until this is done.

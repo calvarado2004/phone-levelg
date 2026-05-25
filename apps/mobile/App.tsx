@@ -1485,13 +1485,20 @@ export default function App() {
         <View style={styles.loginPanel}>
           <Pressable
             disabled={!googleAuthConfigured || !googleRequest}
-            style={[styles.googleButton, (!googleAuthConfigured || !googleRequest) && styles.disabledButton]}
+            style={[styles.googleAccountBox, (!googleAuthConfigured || !googleRequest) && styles.disabledButton]}
             onPress={() => void promptGoogleSignIn()}
           >
-            <Mail color={googleAuthConfigured ? "#24123d" : "#7c8794"} size={20} />
-            <Text style={styles.googleButtonText}>
-              {googleAuthConfigured ? "Sign in with Google" : "Configure Google OAuth client ID"}
-            </Text>
+            <View style={styles.googleGMark}>
+              <Text style={styles.googleGText}>G</Text>
+            </View>
+            <View style={styles.googleAccountText}>
+              <Text style={styles.googleAccountTitle}>
+                {googleAuthConfigured ? "Continue with Google" : "Configure Google OAuth"}
+              </Text>
+              <Text style={styles.googleAccountSubtitle} numberOfLines={1}>
+                {accountEmail || "Gmail account, name, and profile icon"}
+              </Text>
+            </View>
           </Pressable>
           {accountEmail && (
             <View style={styles.accountPill}>
@@ -2263,22 +2270,47 @@ const styles = StyleSheet.create({
     fontSize: 17,
     color: "#141b24"
   },
-  googleButton: {
-    minHeight: 54,
+  googleAccountBox: {
+    minHeight: 72,
     borderRadius: 12,
     borderWidth: 1,
     borderColor: "#ddd1ff",
     backgroundColor: "#ffffff",
-    paddingHorizontal: 15,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    gap: 10
+    gap: 12
   },
-  googleButtonText: {
+  googleGMark: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#ffffff",
+    borderWidth: 1,
+    borderColor: "#e2e8f0"
+  },
+  googleGText: {
+    color: "#4285f4",
+    fontSize: 24,
+    fontWeight: "900"
+  },
+  googleAccountText: {
+    flex: 1,
+    minWidth: 0
+  },
+  googleAccountTitle: {
     color: "#24123d",
     fontSize: 16,
     fontWeight: "800"
+  },
+  googleAccountSubtitle: {
+    marginTop: 3,
+    color: "#5b6472",
+    fontSize: 13,
+    fontWeight: "600"
   },
   accountPill: {
     borderRadius: 12,

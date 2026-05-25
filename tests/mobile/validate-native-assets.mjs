@@ -94,6 +94,8 @@ assert.match(appTsx, /picture\?: string/, "Google profile photos must be read fr
 assert.match(appTsx, /googleAccessToken/, "Mobile login must keep the Google OAuth access token for backend verification");
 assert.match(appTsx, /googleAccessToken: nextGoogleAccessToken/, "Mobile login must send the Google OAuth access token to the private backend");
 assert.match(appTsx, /Google sign-in required/, "Production account creation must require Google sign-in");
+assert.match(appTsx, /Continue with Google/, "Production login must expose a Google account sign-in box");
+assert.match(appTsx, /Gmail account, name, and profile icon/, "Google sign-in box must make clear that Google profile identity is used");
 assert.doesNotMatch(appTsx, /placeholder="Google email"/, "Production login must not allow typed email account creation");
 assert.doesNotMatch(appTsx, /placeholder="Display name"/, "Production login must not allow typed display-name account creation");
 assert.match(appTsx, /avatarURL: nextAvatarURL/, "Login must send the verified Google profile photo URL to the private backend");
