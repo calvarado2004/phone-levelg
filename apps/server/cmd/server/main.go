@@ -1,12 +1,20 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/ecdsa"
 	"crypto/rand"
+	"crypto/sha256"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"fmt"
 	"log/slog"
+	"math/big"
 	"net/http"
 	"os"
 	"strings"
@@ -28,6 +36,14 @@ type config struct {
 	redisAddr        string
 	livekitAPIKey    string
 	livekitAPISecret string
+	apnsTeamID       string
+	apnsKeyID        string
+	apnsBundleID     string
+	apnsPrivateKey   string
+	apnsEndpoint     string
+	fcmProjectID     string
+	fcmAccessToken   string
+	fcmEndpoint      string
 }
 
 type server struct {
@@ -114,6 +130,177 @@ func (noopPushDispatcher) DispatchCallPush(context.Context, callPushPayload, []p
 	return nil
 }
 
+type compositePushDispatcher struct {
+	apns *apnsProvider
+	fcm  *fcmProvider
+}
+
+func buildPushDispatcher(cfg config) pushDispatcher {
+	dispatcher := compositePushDispatcher{
+		apns: newAPNSProvider(cfg),
+		fcm:  newFCMProvider(cfg),
+	}
+	if dispatcher.apns == nil && dispatcher.fcm == nil {
+		slog.Info("native push providers disabled; missing APNs/FCM credentials")
+		return noopPushDispatcher{}
+	}
+	return dispatcher
+}
+
+func (d compositePushDispatcher) DispatchCallPush(ctx context.Context, payload callPushPayload, devices []pushDevice) error {
+	var lastErr error
+	for _, device := range devices {
+		switch device.PushTokenType {
+		case "apns", "apns-voip":
+			if d.apns == nil {
+				slog.Info("skip apns call push; provider disabled", "deviceID", device.DeviceID, "userID", device.UserID)
+				continue
+			}
+			if err := d.apns.SendCallPush(ctx, payload, device); err != nil {
+				lastErr = err
+				slog.Error("send apns call push", "deviceID", device.DeviceID, "userID", device.UserID, "error", err)
+			}
+		case "fcm":
+			if d.fcm == nil {
+				slog.Info("skip fcm call push; provider disabled", "deviceID", device.DeviceID, "userID", device.UserID)
+				continue
+			}
+			if err := d.fcm.SendCallPush(ctx, payload, device); err != nil {
+				lastErr = err
+				slog.Error("send fcm call push", "deviceID", device.DeviceID, "userID", device.UserID, "error", err)
+			}
+		default:
+			slog.Info("skip unsupported push token type", "deviceID", device.DeviceID, "pushTokenType", device.PushTokenType)
+		}
+	}
+	return lastErr
+}
+
+type apnsProvider struct {
+	teamID     string
+	keyID      string
+	bundleID   string
+	privateKey *ecdsa.PrivateKey
+	endpoint   string
+	client     *http.Client
+}
+
+func newAPNSProvider(cfg config) *apnsProvider {
+	if cfg.apnsTeamID == "" || cfg.apnsKeyID == "" || cfg.apnsBundleID == "" || cfg.apnsPrivateKey == "" {
+		return nil
+	}
+	key, err := parseAPNSPrivateKey(cfg.apnsPrivateKey)
+	if err != nil {
+		slog.Error("disable apns provider; invalid private key", "error", err)
+		return nil
+	}
+	return &apnsProvider{
+		teamID:     cfg.apnsTeamID,
+		keyID:      cfg.apnsKeyID,
+		bundleID:   cfg.apnsBundleID,
+		privateKey: key,
+		endpoint:   strings.TrimRight(cfg.apnsEndpoint, "/"),
+		client:     &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (p *apnsProvider) SendCallPush(ctx context.Context, payload callPushPayload, device pushDevice) error {
+	token, err := p.authorizationToken(time.Now())
+	if err != nil {
+		return err
+	}
+	body, err := json.Marshal(apnsCallPayload(payload))
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint+"/3/device/"+device.PushToken, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	pushType := "alert"
+	topic := p.bundleID
+	if device.PushTokenType == "apns-voip" {
+		pushType = "voip"
+		topic += ".voip"
+	}
+	req.Header.Set("authorization", "bearer "+token)
+	req.Header.Set("apns-topic", topic)
+	req.Header.Set("apns-push-type", pushType)
+	req.Header.Set("apns-priority", "10")
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("apns returned %s", resp.Status)
+	}
+	return nil
+}
+
+func (p *apnsProvider) authorizationToken(now time.Time) (string, error) {
+	header := map[string]string{"alg": "ES256", "kid": p.keyID}
+	claims := map[string]any{"iss": p.teamID, "iat": now.Unix()}
+	unsigned, err := jwtUnsigned(header, claims)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.Sum256([]byte(unsigned))
+	r, s, err := ecdsa.Sign(rand.Reader, p.privateKey, hash[:])
+	if err != nil {
+		return "", err
+	}
+	return unsigned + "." + base64.RawURLEncoding.EncodeToString(fixedECDSASignature(r, s, 32)), nil
+}
+
+type fcmProvider struct {
+	projectID   string
+	accessToken string
+	endpoint    string
+	client      *http.Client
+}
+
+func newFCMProvider(cfg config) *fcmProvider {
+	if cfg.fcmProjectID == "" || cfg.fcmAccessToken == "" {
+		return nil
+	}
+	endpoint := strings.TrimSpace(cfg.fcmEndpoint)
+	if endpoint == "" {
+		endpoint = "https://fcm.googleapis.com/v1/projects/" + cfg.fcmProjectID + "/messages:send"
+	}
+	return &fcmProvider{
+		projectID:   cfg.fcmProjectID,
+		accessToken: cfg.fcmAccessToken,
+		endpoint:    endpoint,
+		client:      &http.Client{Timeout: 10 * time.Second},
+	}
+}
+
+func (p *fcmProvider) SendCallPush(ctx context.Context, payload callPushPayload, device pushDevice) error {
+	body, err := json.Marshal(fcmCallPayload(payload, device.PushToken))
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, p.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("authorization", "Bearer "+p.accessToken)
+	req.Header.Set("content-type", "application/json")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("fcm returned %s", resp.Status)
+	}
+	return nil
+}
+
 type callTokenRequest struct {
 	RoomID      string `json:"roomId"`
 	Identity    string `json:"identity"`
@@ -170,7 +357,7 @@ func main() {
 		cfg:   cfg,
 		db:    db,
 		redis: rdb,
-		push:  noopPushDispatcher{},
+		push:  buildPushDispatcher(cfg),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return cfg.corsOrigin == "*" || r.Header.Get("Origin") == cfg.corsOrigin
@@ -215,6 +402,14 @@ func loadConfig() config {
 		redisAddr:        env("REDIS_ADDR", "localhost:6379"),
 		livekitAPIKey:    env("LIVEKIT_API_KEY", "devkey"),
 		livekitAPISecret: env("LIVEKIT_API_SECRET", "secret"),
+		apnsTeamID:       env("APNS_TEAM_ID", ""),
+		apnsKeyID:        env("APNS_KEY_ID", ""),
+		apnsBundleID:     env("APNS_BUNDLE_ID", ""),
+		apnsPrivateKey:   env("APNS_PRIVATE_KEY", ""),
+		apnsEndpoint:     env("APNS_ENDPOINT", "https://api.push.apple.com"),
+		fcmProjectID:     env("FCM_PROJECT_ID", ""),
+		fcmAccessToken:   env("FCM_ACCESS_TOKEN", ""),
+		fcmEndpoint:      env("FCM_ENDPOINT", ""),
 	}
 }
 
@@ -954,6 +1149,94 @@ values ($1, $2, $3, $4, $5, $6)`,
 		}
 	}
 	return msg, true
+}
+
+func apnsCallPayload(payload callPushPayload) map[string]any {
+	return map[string]any{
+		"aps": map[string]any{
+			"alert": map[string]string{
+				"title": callPushTitle(payload.Mode),
+				"body":  payload.Sender + " is calling",
+			},
+			"sound":             "rockstar.mp3",
+			"category":          "INCOMING_CALL",
+			"content-available": 1,
+		},
+		"callId":    payload.CallID,
+		"roomId":    payload.RoomID,
+		"senderId":  payload.SenderID,
+		"sender":    payload.Sender,
+		"mode":      payload.Mode,
+		"expiresAt": payload.ExpiresAt.Format(time.RFC3339Nano),
+	}
+}
+
+func fcmCallPayload(payload callPushPayload, token string) map[string]any {
+	data := map[string]string{
+		"type":      "call:ring",
+		"callId":    payload.CallID,
+		"roomId":    payload.RoomID,
+		"senderId":  payload.SenderID,
+		"sender":    payload.Sender,
+		"mode":      payload.Mode,
+		"expiresAt": payload.ExpiresAt.Format(time.RFC3339Nano),
+	}
+	return map[string]any{
+		"message": map[string]any{
+			"token": token,
+			"data":  data,
+			"android": map[string]any{
+				"priority": "HIGH",
+			},
+			"notification": map[string]string{
+				"title": callPushTitle(payload.Mode),
+				"body":  payload.Sender + " is calling",
+			},
+		},
+	}
+}
+
+func callPushTitle(mode string) string {
+	if mode == "video" {
+		return "Incoming video call"
+	}
+	return "Incoming voice call"
+}
+
+func parseAPNSPrivateKey(value string) (*ecdsa.PrivateKey, error) {
+	normalized := strings.ReplaceAll(strings.TrimSpace(value), `\n`, "\n")
+	block, _ := pem.Decode([]byte(normalized))
+	if block == nil {
+		return nil, errors.New("missing pem block")
+	}
+	parsedKey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	key, ok := parsedKey.(*ecdsa.PrivateKey)
+	if !ok {
+		return nil, errors.New("apns private key must be ecdsa")
+	}
+	return key, nil
+}
+
+func jwtUnsigned(header, claims any) (string, error) {
+	headerJSON, err := json.Marshal(header)
+	if err != nil {
+		return "", err
+	}
+	claimsJSON, err := json.Marshal(claims)
+	if err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(headerJSON) + "." + base64.RawURLEncoding.EncodeToString(claimsJSON), nil
+}
+
+func fixedECDSASignature(r, s *big.Int, size int) []byte {
+	signature := make([]byte, size*2)
+	r.FillBytes(signature[:size])
+	s.FillBytes(signature[size:])
+	return signature
 }
 
 func directMessageRecipients(roomID string) []string {

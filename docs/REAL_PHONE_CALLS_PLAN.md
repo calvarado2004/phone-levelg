@@ -61,15 +61,15 @@ sequenceDiagram
 - [x] Do not send push back to caller devices.
 - [x] Add tests that `call:ring` dispatches both WebSocket and native push work.
 - [x] Persist call attempts for retry/audit.
-- [ ] Attach concrete APNs and FCM provider implementations.
+- [x] Attach concrete APNs and FCM provider implementations.
 
 ### Push Providers And Secrets
 
-- [ ] Add APNs provider configuration to backend.
-- [ ] Add FCM provider configuration to backend.
-- [ ] Store provider credentials in OpenShift secrets.
-- [ ] Add deployment manifest/env wiring for APNs and FCM.
-- [ ] Ensure missing push credentials fail gracefully in local development.
+- [x] Add APNs provider configuration to backend.
+- [x] Add FCM provider configuration to backend.
+- [x] Add OpenShift secret keys for APNs and FCM without committing real credentials.
+- [x] Add deployment manifest/env wiring for APNs and FCM.
+- [x] Ensure missing push credentials fail gracefully in local development.
 
 ### iOS PushKit And CallKit
 
@@ -112,7 +112,8 @@ sequenceDiagram
 - [x] Add backend integration tests for call IDs, expiration, recipient resolution, and push fan-out.
 - [x] Add backend integration tests for persisted call attempts and target device rows.
 - [x] Add native project validation for mobile push-token registration wiring.
-- [ ] Add backend tests for missing APNs/FCM credentials graceful behavior.
+- [x] Add backend tests for missing APNs/FCM credentials graceful behavior.
+- [x] Add backend tests for APNs/FCM call payload shaping.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.

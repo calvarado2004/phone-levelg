@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -112,6 +117,58 @@ func TestRegisterDeviceRejectsInvalidPlatform(t *testing.T) {
 
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected bad request, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestBuildPushDispatcherMissingCredentialsIsNoop(t *testing.T) {
+	dispatcher := buildPushDispatcher(config{})
+	if _, ok := dispatcher.(noopPushDispatcher); !ok {
+		t.Fatalf("expected noop dispatcher without credentials, got %T", dispatcher)
+	}
+	if err := dispatcher.DispatchCallPush(context.Background(), callPushPayload{}, []pushDevice{{PushTokenType: "fcm"}}); err != nil {
+		t.Fatalf("noop dispatcher must not fail local calls: %v", err)
+	}
+}
+
+func TestBuildPushDispatcherEnablesConfiguredProviders(t *testing.T) {
+	dispatcher := buildPushDispatcher(config{
+		apnsTeamID:     "TEAMID",
+		apnsKeyID:      "KEYID",
+		apnsBundleID:   "io.levelg.phone",
+		apnsPrivateKey: testAPNSPrivateKeyPEM(t),
+		apnsEndpoint:   "https://api.sandbox.push.apple.com",
+		fcmProjectID:   "phone-levelg",
+		fcmAccessToken: "token",
+	})
+	composite, ok := dispatcher.(compositePushDispatcher)
+	if !ok {
+		t.Fatalf("expected composite dispatcher, got %T", dispatcher)
+	}
+	if composite.apns == nil || composite.fcm == nil {
+		t.Fatalf("expected both providers to be enabled: %#v", composite)
+	}
+}
+
+func TestCallPushPayloadShapesAPNSAndFCM(t *testing.T) {
+	expiresAt := time.Date(2026, 5, 25, 1, 2, 3, 0, time.UTC)
+	payload := callPushPayload{
+		CallID:    "call-1",
+		RoomID:    "dm:alice:bob",
+		SenderID:  "alice@example.com",
+		Sender:    "Alice",
+		Mode:      "video",
+		ExpiresAt: expiresAt,
+	}
+
+	apnsPayload := apnsCallPayload(payload)
+	if apnsPayload["callId"] != "call-1" || apnsPayload["mode"] != "video" || apnsPayload["expiresAt"] != expiresAt.Format(time.RFC3339Nano) {
+		t.Fatalf("unexpected apns payload: %#v", apnsPayload)
+	}
+	fcmPayload := fcmCallPayload(payload, "fcm-token")
+	message := fcmPayload["message"].(map[string]any)
+	data := message["data"].(map[string]string)
+	if message["token"] != "fcm-token" || data["type"] != "call:ring" || data["callId"] != "call-1" || data["mode"] != "video" {
+		t.Fatalf("unexpected fcm payload: %#v", fcmPayload)
 	}
 }
 
@@ -1003,4 +1060,17 @@ func (r *recordingPushDispatcher) waitForCall(t *testing.T, count int) []recorde
 	defer r.mu.Unlock()
 	t.Fatalf("expected %d push calls, got %d", count, len(r.calls))
 	return nil
+}
+
+func testAPNSPrivateKeyPEM(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate ecdsa key: %v", err)
+	}
+	encodedKey, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatalf("marshal ecdsa key: %v", err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: encodedKey}))
 }

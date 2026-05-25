@@ -38,6 +38,14 @@ stringData:
   LIVEKIT_API_SECRET: "secret"
   DATABASE_URL: "postgres://phone_levelg:phone_levelg@postgres:5432/phone_levelg?sslmode=disable"
   REDIS_ADDR: "redis:6379"
+  APNS_TEAM_ID: ""
+  APNS_KEY_ID: ""
+  APNS_BUNDLE_ID: "io.levelg.phone"
+  APNS_PRIVATE_KEY: ""
+  APNS_ENDPOINT: "https://api.push.apple.com"
+  FCM_PROJECT_ID: ""
+  FCM_ACCESS_TOKEN: ""
+  FCM_ENDPOINT: ""
 ---
 apiVersion: apps/v1
 kind: Deployment
