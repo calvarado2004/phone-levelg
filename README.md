@@ -505,6 +505,8 @@ pod install
 
 The OpenShift manifests live in `deploy/openshift`.
 
+For an end-to-end stack deployment and Android/iPhone installation runbook, use [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md). That guide uses placeholder device IDs only and keeps real phone identifiers and secret material out of Git.
+
 They create:
 
 - namespace `phone-levelg`
