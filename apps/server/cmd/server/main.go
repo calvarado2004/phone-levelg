@@ -71,10 +71,11 @@ type loginRequest struct {
 }
 
 type loginResponse struct {
-	UserID       string `json:"userId"`
-	DisplayName  string `json:"displayName"`
-	AccountEmail string `json:"accountEmail"`
-	AvatarURL    string `json:"avatarURL,omitempty"`
+	UserID           string `json:"userId"`
+	DisplayName      string `json:"displayName"`
+	AccountEmail     string `json:"accountEmail"`
+	AvatarURL        string `json:"avatarURL,omitempty"`
+	MessageKeySecret string `json:"messageKeySecret"`
 }
 
 type googleUserInfo struct {
@@ -808,7 +809,18 @@ returning id`, userID, req.DisplayName, req.AvatarURL).Scan(&userID)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, loginResponse{UserID: userID, DisplayName: req.DisplayName, AccountEmail: req.AccountEmail, AvatarURL: req.AvatarURL})
+	writeJSON(w, http.StatusOK, loginResponse{
+		UserID:           userID,
+		DisplayName:      req.DisplayName,
+		AccountEmail:     req.AccountEmail,
+		AvatarURL:        req.AvatarURL,
+		MessageKeySecret: messageKeySecret(s.cfg.sharedInviteCode),
+	})
+}
+
+func messageKeySecret(inviteCode string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(inviteCode)))
+	return hex.EncodeToString(sum[:])
 }
 
 func (s *server) googleUserInfo(ctx context.Context, accessToken string) (googleUserInfo, error) {

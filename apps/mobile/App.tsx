@@ -129,7 +129,7 @@ const GOOGLE_DISCOVERY = {
 };
 const ROOM_ID = "home";
 const E2E_MODE = process.env.EXPO_PUBLIC_E2E_MODE === "1";
-const STORED_SESSION_KEY = "phone-levelg.session.v3";
+const STORED_SESSION_KEY = "phone-levelg.session.v4";
 const STORED_DEVICE_ID_KEY = "phone-levelg.device.v1";
 const STORED_PENDING_CALL_KEY = "phone-levelg.pendingCall.v1";
 const STORED_PRIVATE_MESSAGE_SOUND_KEY = "phone-levelg.privateMessageSound.v1";
@@ -152,6 +152,7 @@ type Session = {
   displayName: string;
   accountEmail: string;
   avatarURL?: string;
+  messageKeySecret: string;
 };
 
 type StoredSession = {
@@ -272,7 +273,7 @@ export default function App() {
   );
   const [session, setSession] = useState<Session | null>(
     E2E_MODE && e2eScreen !== "login"
-      ? { userId: "e2e-user", displayName: "Carlos", accountEmail: "carlos@example.test" }
+      ? { userId: "e2e-user", displayName: "Carlos", accountEmail: "carlos@example.test", messageKeySecret: "e2e-message-key-secret" }
       : null
   );
   const [displayName, setDisplayName] = useState("");
@@ -786,7 +787,7 @@ export default function App() {
       if (!stored) return;
 
       const payload = JSON.parse(stored) as StoredSession;
-      if (!payload.session?.userId || payload.expiresAt <= Date.now()) {
+      if (!payload.session?.userId || !payload.session.messageKeySecret || payload.expiresAt <= Date.now()) {
         await AsyncStorage.removeItem(STORED_SESSION_KEY);
         return;
       }
@@ -918,7 +919,7 @@ export default function App() {
     if (!userID) return;
     try {
       const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(roomID)}/messages?userId=${encodeURIComponent(userID)}`);
-      const nextMessages = await decryptMessages((payload.messages ?? []) as Message[], inviteCode);
+      const nextMessages = await decryptMessages((payload.messages ?? []) as Message[], session?.messageKeySecret);
       setMessages(current => messagesEqual(current, nextMessages) ? current : nextMessages);
     } catch {
       // Keep the existing view if a transient refresh fails.
@@ -982,7 +983,7 @@ export default function App() {
     const handleSocketMessage = (event: WebSocketMessageEvent) => {
       const payload = JSON.parse(event.data) as SocketEvent;
       if (payload.type === "message:new") {
-        void decryptMessage(payload.data, inviteCode).then(nextMessage => {
+        void decryptMessage(payload.data, session.messageKeySecret).then(nextMessage => {
           if (nextMessage.roomId === activeRoomID) {
             setMessages(current => mergeMessages(current, nextMessage));
           } else if (nextMessage.senderId !== session.userId) {
@@ -1092,7 +1093,13 @@ export default function App() {
     const nextAvatarURL = normalizeAvatarURL(googleProfile?.picture ?? avatarURL);
 
     if (E2E_MODE) {
-      setSession({ userId: "e2e-user", displayName: nextDisplayName || "Carlos", accountEmail: nextAccountEmail || "carlos@example.test", avatarURL: nextAvatarURL });
+      setSession({
+        userId: "e2e-user",
+        displayName: nextDisplayName || "Carlos",
+        accountEmail: nextAccountEmail || "carlos@example.test",
+        avatarURL: nextAvatarURL,
+        messageKeySecret: "e2e-message-key-secret"
+      });
       setConnected(true);
       return;
     }
@@ -1122,6 +1129,10 @@ export default function App() {
       }
 
       const nextSession = await response.json() as Session;
+      if (!nextSession.messageKeySecret) {
+        Alert.alert("Login failed", "Server did not return the message encryption key. Update the backend and try again.");
+        return;
+      }
       setSession(nextSession);
       await persistSession(nextSession, apiURL, inviteCode.trim());
       void registerDeviceForPush(nextSession, apiURL);
@@ -1208,7 +1219,7 @@ export default function App() {
     const nextText = text.trim();
     try {
       const payload = await persistEncryptedMessage(nextText);
-      const savedMessage = await decryptMessage(payload.message as Message, inviteCode);
+      const savedMessage = await decryptMessage(payload.message as Message, session.messageKeySecret);
       setMessages(current => mergeMessages(current, savedMessage));
       setDraft("");
     } catch {
@@ -1232,7 +1243,7 @@ export default function App() {
         Alert.alert("File too large", "Send files up to 8 MB for now.");
         return;
       }
-      const key = await deriveRoomMessageKey(activeRoomID, inviteCode);
+      const key = await deriveRoomMessageKey(activeRoomID, session.messageKeySecret);
       const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
       const encryptedFile = nacl.secretbox(fileBytes, nonce, key);
       const uploadPayload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/attachments`, {
@@ -1256,7 +1267,7 @@ export default function App() {
         nonce: naclUtil.encodeBase64(nonce)
       };
       const messagePayload = await persistEncryptedMessage(`${ATTACHMENT_MESSAGE_PREFIX}${JSON.stringify(metadata)}`);
-      const savedMessage = await decryptMessage(messagePayload.message as Message, inviteCode);
+      const savedMessage = await decryptMessage(messagePayload.message as Message, session.messageKeySecret);
       setMessages(current => mergeMessages(current, savedMessage));
     } catch (error) {
       console.warn("Attachment send failed", error);
@@ -1270,7 +1281,7 @@ export default function App() {
     if (!session) {
       throw new Error("missing session");
     }
-    const encryptedText = await encryptMessageText(activeRoomID, text, inviteCode);
+    const encryptedText = await encryptMessageText(activeRoomID, text, session.messageKeySecret);
     return fetchJSON(`${apiURL}/rooms/${encodeURIComponent(activeRoomID)}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1287,7 +1298,7 @@ export default function App() {
     try {
       const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(message.roomId)}/attachments/${encodeURIComponent(message.attachment.attachmentId)}?userId=${encodeURIComponent(session.userId)}`);
       const encryptedData = String(payload.attachment?.data ?? "");
-      const key = await deriveRoomMessageKey(message.roomId, inviteCode);
+      const key = await deriveRoomMessageKey(message.roomId, session.messageKeySecret);
       const opened = nacl.secretbox.open(naclUtil.decodeBase64(encryptedData), naclUtil.decodeBase64(message.attachment.nonce), key);
       if (!opened) {
         Alert.alert("Attachment locked", "This device could not decrypt the file.");
@@ -2238,20 +2249,21 @@ function mergeMessages(current: Message[], next: Message) {
   return [...current, next];
 }
 
-async function encryptMessageText(roomID: string, text: string, inviteCode: string) {
+async function encryptMessageText(roomID: string, text: string, messageKeySecret: string) {
   if (E2E_MODE) return text;
-  const key = await deriveRoomMessageKey(roomID, inviteCode);
+  const key = await deriveRoomMessageKey(roomID, messageKeySecret);
   const nonce = nacl.randomBytes(nacl.secretbox.nonceLength);
   const box = nacl.secretbox(naclUtil.decodeUTF8(text), nonce, key);
   return `${ENCRYPTED_MESSAGE_PREFIX}${naclUtil.encodeBase64(nonce)}:${naclUtil.encodeBase64(box)}`;
 }
 
-async function decryptMessages(messages: Message[], inviteCode: string) {
-  return Promise.all(messages.map(message => decryptMessage(message, inviteCode)));
+async function decryptMessages(messages: Message[], messageKeySecret?: string) {
+  return Promise.all(messages.map(message => decryptMessage(message, messageKeySecret)));
 }
 
-async function decryptMessage(message: Message, inviteCode: string) {
+async function decryptMessage(message: Message, messageKeySecret?: string) {
   if (!isEncryptedMessageText(message.text)) return message;
+  if (!messageKeySecret) return { ...message, text: ENCRYPTED_MESSAGE_UNAVAILABLE };
   try {
     const encryptedPayload = message.text.slice(ENCRYPTED_MESSAGE_PREFIX.length);
     const [nonceText, boxText] = encryptedPayload.split(":");
@@ -2259,7 +2271,7 @@ async function decryptMessage(message: Message, inviteCode: string) {
       return { ...message, text: ENCRYPTED_MESSAGE_UNAVAILABLE };
     }
 
-    const key = await deriveRoomMessageKey(message.roomId, inviteCode);
+    const key = await deriveRoomMessageKey(message.roomId, messageKeySecret);
     const opened = nacl.secretbox.open(naclUtil.decodeBase64(boxText), naclUtil.decodeBase64(nonceText), key);
     if (!opened) {
       return { ...message, text: ENCRYPTED_MESSAGE_UNAVAILABLE };
@@ -2279,8 +2291,8 @@ function isEncryptedMessageText(text: string) {
   return text.startsWith(ENCRYPTED_MESSAGE_PREFIX);
 }
 
-async function deriveRoomMessageKey(roomID: string, inviteCode: string) {
-  const secret = inviteCode.trim();
+async function deriveRoomMessageKey(roomID: string, messageKeySecret: string) {
+  const secret = messageKeySecret.trim();
   if (!secret) {
     throw new Error("missing message encryption secret");
   }

@@ -11,6 +11,10 @@ const iosEntitlements = readFileSync("apps/mobile/ios/PhoneLevelG/PhoneLevelG.en
 const iosBridgingHeader = readFileSync("apps/mobile/ios/PhoneLevelG/PhoneLevelG-Bridging-Header.h", "utf8");
 const iosVoipTokenModule = readFileSync("apps/mobile/ios/PhoneLevelG/PhoneLevelGVoIPTokenModule.m", "utf8");
 const iosProject = readFileSync("apps/mobile/ios/PhoneLevelG.xcodeproj/project.pbxproj", "utf8");
+const iosGoogleServicePlistPath = "apps/mobile/ios/PhoneLevelG/GoogleService-Info.plist";
+const builtIOSInfoPlistPath = "apps/mobile/ios/DerivedData-device/Build/Products/Release-iphoneos/PhoneLevelG.app/Info.plist";
+const iosGoogleServicePlist = existsSync(iosGoogleServicePlistPath) ? readFileSync(iosGoogleServicePlistPath, "utf8") : "";
+const builtIOSInfoPlist = existsSync(builtIOSInfoPlistPath) ? readFileSync(builtIOSInfoPlistPath, "utf8") : "";
 const rootPackage = readFileSync("package.json", "utf8");
 const openshiftServer = readFileSync("deploy/openshift/server.yaml", "utf8");
 const appJson = readFileSync("apps/mobile/app.json", "utf8");
@@ -40,6 +44,8 @@ assert.match(infoPlist, /<string>voip<\/string>/, "iOS must enable VoIP backgrou
 assert.match(iosEntitlements, /aps-environment/, "iOS must include the APNs entitlement required for PushKit token registration");
 assert.match(iosBridgingHeader, /RNCallKeep\.h/, "iOS Swift app delegate must be able to report PushKit calls through RNCallKeep");
 assert.match(iosAppDelegate, /import PushKit/, "iOS app delegate must import PushKit");
+assert.match(iosAppDelegate, /import GoogleSignIn/, "iOS app delegate must import GoogleSignIn so native sign-in callbacks are handled");
+assert.match(iosAppDelegate, /GIDSignIn\.sharedInstance\.handle\(url\)/, "iOS app delegate must hand Google callback URLs to GoogleSignIn before React Linking");
 assert.match(iosAppDelegate, /PKPushRegistryDelegate/, "iOS app delegate must implement PushKit callbacks");
 assert.match(iosAppDelegate, /desiredPushTypes = \[\.voIP\]/, "iOS app delegate must register for VoIP pushes");
 assert.match(iosAppDelegate, /RNCallKeep\.reportNewIncomingCall/, "iOS PushKit calls must be reported to CallKit immediately");
@@ -58,7 +64,10 @@ assert.match(appTsx, /TOP_SAFE_AREA_HEIGHT = ANDROID_STATUS_BAR_HEIGHT \+ IOS_ST
 assert.match(appTsx, /paddingTop: 10 \+ TOP_SAFE_AREA_HEIGHT/, "Header must reserve status bar space so call buttons are tappable");
 assert.doesNotMatch(appTsx, /SafeAreaView/, "App must avoid deprecated React Native SafeAreaView warnings");
 assert.match(appTsx, /@react-native-async-storage\/async-storage/, "Mobile app must persist sessions locally");
-assert.match(appTsx, /STORED_SESSION_KEY = "phone-levelg\.session\.v3"/, "Mobile app must force a fresh login after hardening multi-device email sessions");
+assert.match(appTsx, /STORED_SESSION_KEY = "phone-levelg\.session\.v4"/, "Mobile app must force a fresh login after moving encryption to the server-confirmed session key");
+assert.match(appTsx, /messageKeySecret: string/, "Mobile sessions must carry the server-confirmed message encryption key secret");
+assert.match(appTsx, /!payload\.session\.messageKeySecret/, "Stored sessions without a message key secret must be rejected so old broken encryption state cannot persist");
+assert.match(appTsx, /if \(!nextSession\.messageKeySecret\)/, "Login must reject backends that do not return the message encryption key secret");
 assert.match(appTsx, /SESSION_TTL_MS = 30 \* 24 \* 60 \* 60 \* 1000/, "Mobile login sessions must last for 30 days");
 assert.match(appTsx, /AsyncStorage\.setItem\(STORED_SESSION_KEY/, "Successful login must store the session");
 assert.match(appTsx, /AsyncStorage\.removeItem\(STORED_SESSION_KEY/, "Logout must clear the stored 30-day session");
@@ -130,6 +139,15 @@ assert.match(appTsx, /payload\.type === "message:clear"/, "Mobile app must clear
 assert.match(appTsx, /ENCRYPTED_MESSAGE_PREFIX = "plgenc:v1:"/, "Mobile messages must use a versioned encrypted envelope before server persistence");
 assert.match(appTsx, /ATTACHMENT_MESSAGE_PREFIX = "plgattach:v1:"/, "Mobile attachments must use a versioned encrypted metadata envelope");
 assert.match(appTsx, /nacl\.secretbox\(naclUtil\.decodeUTF8\(text\), nonce, key\)/, "Mobile message encryption must use a proven authenticated secretbox primitive");
+assert.match(appTsx, /encryptMessageText\(activeRoomID, text, session\.messageKeySecret\)/, "Message encryption must use the server-confirmed session key secret, not local invite-code state");
+assert.match(appTsx, /decryptMessages\(\(payload\.messages \?\? \[\]\) as Message\[\], session\?\.messageKeySecret\)/, "History decryption must use the server-confirmed session key secret");
+assert.match(appTsx, /decryptMessage\(payload\.data, session\.messageKeySecret\)/, "Live websocket message decryption must use the server-confirmed session key secret");
+assert.match(appTsx, /decryptMessage\(payload\.message as Message, session\.messageKeySecret\)/, "Saved message rendering must decrypt with the same session key used to encrypt");
+assert.match(appTsx, /deriveRoomMessageKey\(activeRoomID, session\.messageKeySecret\)/, "Attachment file encryption must use the same server-confirmed session key secret as chat text");
+assert.match(appTsx, /deriveRoomMessageKey\(message\.roomId, session\.messageKeySecret\)/, "Attachment download decryption must use the same server-confirmed session key secret as upload");
+assert.doesNotMatch(appTsx, /encryptMessageText\(activeRoomID, text, inviteCode\)/, "Message encryption must not use mutable invite-code UI state");
+assert.doesNotMatch(appTsx, /decryptMessage\([^)]*, inviteCode\)/, "Message decryption must not use mutable invite-code UI state");
+assert.doesNotMatch(appTsx, /deriveRoomMessageKey\([^)]*, inviteCode\)/, "Attachment encryption/decryption must not use mutable invite-code UI state");
 assert.match(appTsx, /readPickedAttachmentBytes\(picked\)/, "Mobile attachments must load picker bytes through the shared readable attachment path before encryption");
 assert.match(appTsx, /DocumentPicker\.getDocumentAsync\(\{[\s\S]*base64: true/, "Document attachments must request picker-provided base64 so Android and iOS document-provider URIs are readable");
 assert.match(appTsx, /ImagePicker\.launchImageLibraryAsync\(\{[\s\S]*base64: true/, "Photo attachments must request picker-provided base64 so iOS photo-library assets are readable");
@@ -236,6 +254,13 @@ assert.ok(existsSync("apps/mobile/ios/PhoneLevelG/rockstar.mp3"), "iOS rockstar 
 assert.ok(existsSync("apps/mobile/android/app/src/main/res/raw/message_notification.mp3"), "Android private message ringtone must be packaged as a raw resource");
 assert.ok(existsSync("apps/mobile/ios/PhoneLevelG/message-notification.mp3"), "iOS private message ringtone must be packaged in the app bundle");
 assert.match(iosProject, /message-notification\.mp3 in Resources/, "iOS private message ringtone must be copied into the app resources");
+if (iosGoogleServicePlist) {
+  assert.match(iosGoogleServicePlist, /<key>REVERSED_CLIENT_ID<\/key>\s*<string>[^<]+<\/string>/, "Local iOS GoogleService-Info.plist must include REVERSED_CLIENT_ID for release builds");
+}
+if (builtIOSInfoPlist) {
+  assert.doesNotMatch(builtIOSInfoPlist, /<string><\/string>/, "Built iOS release Info.plist must not contain an empty URL scheme");
+  assert.doesNotMatch(builtIOSInfoPlist, /<string>\$\(GOOGLE_REVERSED_CLIENT_ID\)<\/string>/, "Built iOS release Info.plist must expand GOOGLE_REVERSED_CLIENT_ID");
+}
 assert.match(appTsx, /setNotificationChannelAsync\(INCOMING_CALL_CHANNEL_ID/, "Android incoming calls must use a high-priority notification channel");
 assert.match(appTsx, /Vibration\.vibrate\(\[0, 750, 350\], true\)/, "Incoming calls must vibrate until accepted or declined");
 assert.match(appTsx, /bottom: 0,[\s\S]*justifyContent: "space-between"/, "Incoming calls must use a full-screen phone-style call sheet");

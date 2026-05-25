@@ -72,6 +72,28 @@ func TestLoginRejectsMissingAccountEmail(t *testing.T) {
 	}
 }
 
+func TestMessageKeySecretIsStableAndNotRawInvite(t *testing.T) {
+	first := messageKeySecret("home")
+	second := messageKeySecret(" home ")
+	other := messageKeySecret("other")
+
+	if first == "" {
+		t.Fatal("expected message key secret")
+	}
+	if first != second {
+		t.Fatal("expected trimmed invite code to produce stable message key secret")
+	}
+	if first == "home" {
+		t.Fatal("message key secret must not echo the raw invite code")
+	}
+	if first == other {
+		t.Fatal("different invite codes must produce different message key secrets")
+	}
+	if len(first) != 64 {
+		t.Fatalf("expected sha256 hex message key secret, got %d chars", len(first))
+	}
+}
+
 func TestDirectMessageRecipientsAreExplicitPrivateRooms(t *testing.T) {
 	recipients := directMessageRecipients("dm:alice:bob")
 	if len(recipients) != 2 || recipients[0] != "alice" || recipients[1] != "bob" {
@@ -459,6 +481,18 @@ func TestIntegrationLoginUsesVerifiedGoogleIdentity(t *testing.T) {
 	}
 	if session.UserID != "carlos@example.com" || session.AccountEmail != "carlos@example.com" || session.DisplayName != "Carlos Google" || session.AvatarURL != "https://example.com/carlos.png" {
 		t.Fatalf("expected verified Google identity to drive login, got %#v", session)
+	}
+	if session.MessageKeySecret == "" || session.MessageKeySecret == "home" {
+		t.Fatalf("expected login to return a canonical non-raw message key secret, got %q", session.MessageKeySecret)
+	}
+	secondSession := loginForTest(t, app, loginRequest{
+		DisplayName:       "Ignored Again",
+		AccountEmail:      "ignored-again@example.com",
+		GoogleAccessToken: "google-token",
+		InviteCode:        "home",
+	})
+	if secondSession.MessageKeySecret != session.MessageKeySecret {
+		t.Fatal("same server invite must return the same message key secret on every device login")
 	}
 }
 
