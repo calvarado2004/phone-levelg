@@ -7,8 +7,9 @@ This plan tracks the work required for Phone LevelG to behave like a real phone 
 - Current foreground calls work through WebSocket signaling plus LiveKit media.
 - Native wake-up delivery is implemented through APNs/PushKit + CallKit on iOS and FCM + full-screen incoming-call UI on Android.
 - iOS incoming calls now use one OS-level path: PushKit wakes the app and CallKit presents the call UI. The React Native incoming-call sheet and local ringtone are Android/foreground fallbacks only, which avoids duplicate native and in-app call surfaces on iPhone.
+- iPhone locked/background incoming calls were validated on May 25, 2026 after APNs Auth Key configuration, APNs provider-token caching, and the push queue rollout.
 - Call reject and no-answer events now carry the same call id as the outgoing ring, so the caller's attempt ends immediately with `Call rejected` or `No answer` instead of waiting ambiguously.
-- Locked/background validation remains the main open item: the latest release builds are installed, but both platforms still need repeated physical-device tests while locked, backgrounded, and force-closed.
+- Locked/background validation remains open for Android; iPhone locked/background incoming calls are validated, while foreground call and direct-chat cleanup regressions still need final deployed checks.
 - Google account creation now uses the native Google Sign-In SDK on Android/iOS. AuthSession remains only for web/dev browser flows.
 - Message bodies are encrypted on the mobile client before backend persistence. The current phase is server-blind shared room encryption; per-device key exchange is the next hardening phase.
 - 1-1 encrypted attachments are implemented for pictures and documents. The backend stores opaque encrypted blobs and the encrypted chat message carries the private filename/type metadata.
@@ -141,7 +142,7 @@ sequenceDiagram
 - [x] Wire CallKit accept to LiveKit join.
 - [x] Wire CallKit decline/end to backend `call:reject` / `call:end`.
 - [x] Clear stale CallKit calls on expiration or remote end.
-- [ ] Validate on a locked physical iPhone.
+- [x] Validate on a locked physical iPhone.
 
 ### Android FCM And Full-Screen Calls
 
@@ -251,15 +252,15 @@ sequenceDiagram
 - [x] Configure APNs Auth Key in OpenShift and verify APNs private-message sends are accepted.
 - [x] Rotate deployed LiveKit credentials away from the invalid development secret.
 - [ ] Test foreground call.
-- [ ] Test iPhone locked/background incoming call.
+- [x] Test iPhone locked/background incoming call.
 - [ ] Test Android locked/background incoming call.
 - [ ] Test direct-chat cleanup still works with email-backed user ids.
 
 ## Notes
 
 - iOS VoIP pushes must be used only for real calls and must report to CallKit promptly.
-- iOS registers both the regular APNs token and the PushKit VoIP token. Locked/suspended iPhone behavior still needs physical-device validation with valid APNs credentials.
-- The latest iOS release device build installs on both connected iPhones through the paid Apple Developer team. Push entitlement and APNs behavior still need locked-device validation.
+- iOS registers both the regular APNs token and the PushKit VoIP token. Locked/suspended iPhone incoming-call behavior is validated as of May 25, 2026.
+- The latest iOS release device build installs on both connected iPhones through the paid Apple Developer team. Push entitlement and APNs call behavior are validated for locked/background iPhone calls.
 - APNs/FCM credentials must never be committed to the repository.
 - Email remains the stable user identity. Display name is presentation only.
 - Push delivery complements WebSocket signaling; it does not replace LiveKit for media.
