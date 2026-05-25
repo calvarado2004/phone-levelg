@@ -11,6 +11,7 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Linking,
   LogBox,
   Platform,
   PermissionsAndroid,
@@ -252,6 +253,7 @@ export default function App() {
   const outgoingCallTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callKeepReadyRef = useRef(false);
   const incomingCallNotificationRef = useRef<string | null>(null);
+  const pendingNativeAcceptRef = useRef<IncomingCallPayload | null>(null);
   const apiURL = useMemo(() => normalizeServerURL(serverURL), [serverURL]);
   const googleAuthConfigured = Boolean(GOOGLE_CLIENT_ID);
 
@@ -273,6 +275,26 @@ export default function App() {
     if (E2E_MODE) return;
     void restoreStoredSession();
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS !== "android" || E2E_MODE) return;
+    const handleURL = (url: string | null) => {
+      const nativeCall = parseNativeCallURL(url);
+      if (nativeCall?.action === "accept") {
+        void acceptNativeIncomingCallPayload(nativeCall.payload);
+      }
+    };
+    void Linking.getInitialURL().then(handleURL).catch(() => undefined);
+    const subscription = Linking.addEventListener("url", event => handleURL(event.url));
+    return () => subscription.remove();
+  }, []);
+
+  useEffect(() => {
+    if (!session || !pendingNativeAcceptRef.current) return;
+    const payload = pendingNativeAcceptRef.current;
+    pendingNativeAcceptRef.current = null;
+    void acceptNativeIncomingCallPayload(payload);
+  }, [session]);
 
   useEffect(() => {
     if (!session || E2E_MODE || !supportsNativePushRegistration()) return;
@@ -462,6 +484,44 @@ export default function App() {
     await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
     await joinCall(call.mode, call.roomId, false);
     getNativeCallKeep()?.setCurrentCallActive?.(callUUID);
+  }
+
+  async function acceptNativeIncomingCallPayload(payload: IncomingCallPayload) {
+    if (!session) {
+      pendingNativeAcceptRef.current = payload;
+      return;
+    }
+    if (payload.senderId === session.userId || isExpiredCall(payload.expiresAt)) return;
+
+    const currentCall = incomingCallRef.current;
+    if (currentCall && callMatchesPayload(currentCall, payload)) {
+      activeCallUUIDRef.current = currentCall.callUUID;
+      clearIncomingCallExpirationTimer();
+      setIncomingCall(null);
+      incomingCallRef.current = null;
+      await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
+      await joinCall(currentCall.mode, currentCall.roomId, false);
+      return;
+    }
+    if (activeCallRoomIDRef.current === payload.roomId) return;
+
+    const callUUID = createCallUUID();
+    activeCallUUIDRef.current = callUUID;
+    handledCallIDsRef.current.add(payload.callId);
+    nativeCallsRef.current[callUUID] = {
+      callUUID,
+      callId: payload.callId,
+      roomId: payload.roomId,
+      senderId: payload.senderId,
+      sender: payload.sender,
+      mode: payload.mode,
+      expiresAt: payload.expiresAt
+    };
+    setCallPeer({ displayName: payload.sender });
+    setIncomingCall(null);
+    incomingCallRef.current = null;
+    await AsyncStorage.removeItem(STORED_PENDING_CALL_KEY).catch(() => undefined);
+    await joinCall(payload.mode, payload.roomId, false);
   }
 
   async function endNativeCall(callUUID: string) {
@@ -1693,6 +1753,22 @@ function normalizeIncomingCallPayload(data: unknown): IncomingCallPayload | null
   const expiresAt = typeof payload.expiresAt === "string" ? payload.expiresAt : undefined;
   if (!roomId || !senderId || !sender) return null;
   return { callId, roomId, senderId, sender, mode, expiresAt };
+}
+
+function parseNativeCallURL(url: string | null): { action: "accept"; payload: IncomingCallPayload } | null {
+  if (!url?.startsWith("phonelevelg://call?")) return null;
+  const query = url.slice("phonelevelg://call?".length);
+  const params = query.split("&").reduce<Record<string, string>>((current, part) => {
+    const [rawKey, rawValue = ""] = part.split("=");
+    if (!rawKey) return current;
+    current[decodeURIComponent(rawKey)] = decodeURIComponent(rawValue.replace(/\+/g, " "));
+    return current;
+  }, {});
+  if (params.action !== "accept") return null;
+
+  const payload = normalizeIncomingCallPayload(params);
+  if (!payload) return null;
+  return { action: "accept", payload };
 }
 
 function isExpiredCall(expiresAt?: string) {

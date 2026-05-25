@@ -106,6 +106,7 @@ sequenceDiagram
 - [x] Persist pending incoming call metadata long enough for native action handling.
 - [x] Ensure expired pushes do not show call UI.
 - [x] Ensure caller sees `Call rejected`, `Call ended`, or `Unavailable`.
+- [x] Route Android native Answer actions into the existing LiveKit join path.
 - [ ] Keep local and remote video behavior unchanged after push-based entry.
 
 ### Test Coverage
@@ -121,6 +122,7 @@ sequenceDiagram
 - [x] Add native project validation for caller-side unanswered-call timeout.
 - [x] Add native project validation for Android full-screen call activity, notification, ringtone, and action wiring.
 - [x] Add native project validation for Android Firebase Messaging background-call handling.
+- [x] Add native project validation for Android native Answer deep-link handling.
 - [ ] Add iOS native tests or deterministic validation hooks for PushKit/CallKit accept, decline, and expiration.
 - [ ] Add Android native tests or deterministic validation hooks for FCM background handling and full-screen actions.
 - [ ] Add end-to-end call tests covering foreground, background, and locked-device paths.

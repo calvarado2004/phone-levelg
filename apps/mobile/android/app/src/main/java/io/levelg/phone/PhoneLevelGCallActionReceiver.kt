@@ -18,7 +18,11 @@ class PhoneLevelGCallActionReceiver : BroadcastReceiver() {
           data = Uri.parse(
             "phonelevelg://call?action=accept" +
               "&callId=${Uri.encode(callId)}" +
-              "&roomId=${Uri.encode(extras[AndroidCallNotifications.EXTRA_ROOM_ID].orEmpty())}"
+              queryParam("roomId", extras[AndroidCallNotifications.EXTRA_ROOM_ID]) +
+              queryParam("senderId", extras[AndroidCallNotifications.EXTRA_SENDER_ID]) +
+              queryParam("sender", extras[AndroidCallNotifications.EXTRA_SENDER]) +
+              queryParam("mode", extras[AndroidCallNotifications.EXTRA_MODE]) +
+              queryParam("expiresAt", extras[AndroidCallNotifications.EXTRA_EXPIRES_AT])
           )
           extras.forEach { (key, value) -> putExtra(key, value) }
         }
@@ -27,6 +31,10 @@ class PhoneLevelGCallActionReceiver : BroadcastReceiver() {
 
       AndroidCallNotifications.ACTION_DECLINE -> return
     }
+  }
+
+  private fun queryParam(name: String, value: String?): String {
+    return if (value.isNullOrBlank()) "" else "&$name=${Uri.encode(value)}"
   }
 
   private fun extrasMap(intent: Intent): Map<String, String> {

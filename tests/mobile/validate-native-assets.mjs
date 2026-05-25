@@ -54,6 +54,10 @@ assert.match(appTsx, /STORED_PENDING_CALL_KEY = "phone-levelg\.pendingCall\.v1"/
 assert.match(appTsx, /handledCallIDsRef = useRef<Set<string>>\(new Set\(\)\)/, "Mobile app must deduplicate websocket and native-push rings by call id");
 assert.match(appTsx, /Notifications\.addNotificationReceivedListener/, "Mobile app must handle call metadata delivered by native notifications");
 assert.match(appTsx, /Notifications\.addNotificationResponseReceivedListener/, "Mobile app must handle call metadata when a native notification is opened");
+assert.match(appTsx, /Linking\.getInitialURL\(\)/, "Android native call actions must be consumed when the app is launched from an incoming-call intent");
+assert.match(appTsx, /Linking\.addEventListener\("url"/, "Android native call actions must be consumed while the app is already running");
+assert.match(appTsx, /parseNativeCallURL/, "Mobile app must parse native call deep links into normal call payloads");
+assert.match(appTsx, /acceptNativeIncomingCallPayload/, "Mobile app must accept Android native call actions through the LiveKit join path");
 assert.match(appTsx, /normalizeIncomingCallPayload/, "Mobile app must normalize websocket and native-push call payloads through one path");
 assert.match(appTsx, /isExpiredCall\(payload\.expiresAt\)/, "Mobile app must ignore expired native call pushes");
 assert.match(appTsx, /callMatchesPayload\(incomingCallRef\.current, payload\.data\)/, "Remote call end/reject must match by call id when present");
@@ -130,6 +134,8 @@ assert.match(androidCallNotifications, /CATEGORY_CALL/, "Android incoming call n
 assert.match(androidCallNotifications, /R\.raw\.rockstar/, "Android native call notifications must reuse the rockstar ringtone");
 assert.match(androidIncomingCallActivity, /setShowWhenLocked\(true\)/, "Android incoming call activity must show above the lock screen");
 assert.match(androidCallActionReceiver, /phonelevelg:\/\/call/, "Android accept action must route into the existing app scheme");
+assert.match(androidCallActionReceiver, /queryParam\("senderId"/, "Android accept action must pass sender id into the app");
+assert.match(androidCallActionReceiver, /queryParam\("sender"/, "Android accept action must pass sender display name into the app");
 assert.match(androidCallActionReceiver, /ACTION_ACCEPT/, "Android native call action receiver must support accept actions");
 assert.match(androidCallActionReceiver, /ACTION_DECLINE/, "Android native call action receiver must support decline actions");
 assert.ok(existsSync("apps/mobile/android/app/src/main/res/raw/rockstar.mp3"), "Android rockstar ringtone must be packaged as a raw resource");
