@@ -178,6 +178,7 @@ type Message = {
   text: string;
   attachment?: MessageAttachment;
   createdAt: string;
+  deliveredAt?: string;
   readAt?: string;
 };
 
@@ -247,6 +248,7 @@ type PermissionState = "unknown" | "granted" | "denied";
 type SocketEvent =
   | { type: "message:new"; data: Message }
   | { type: "message:clear"; data: { roomId: string; senderId: string } }
+  | { type: "message:delivered"; data: { roomId: string; readerId: string; messageIds: string[]; deliveredAt: string } }
   | { type: "message:read"; data: { roomId: string; readerId: string; messageIds: string[]; readAt: string } }
   | { type: "call:ring"; data: { callId?: string; roomId: string; senderId: string; sender: string; mode?: "voice" | "video"; expiresAt?: string } }
   | { type: "call:end"; data: { callId?: string; roomId: string; senderId: string; sender: string; reason?: string } }
@@ -349,6 +351,8 @@ export default function App() {
   const notifiedPrivateMessageIDsRef = useRef<Set<string>>(new Set());
   const privateMessageSoundEnabledRef = useRef(true);
   const loadingAttachmentPreviewIDsRef = useRef<Set<string>>(new Set());
+  const messagesListRef = useRef<FlatList<Message> | null>(null);
+  const pendingMessageScrollRef = useRef(false);
   const incomingCallExpirationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outgoingCallTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const callKeepReadyRef = useRef(false);
@@ -373,11 +377,21 @@ export default function App() {
   const isFullScreenCall = callActive;
   const selfReachable = session ? members.find(member => member.id === session.userId)?.reachable !== false : false;
   const connectionStatus = connected ? callStatus : selfReachable ? "Ready" : "Offline";
-  const latestReadSentMessageID = session ? [...messages].reverse().find(message => message.senderId === session.userId && message.readAt)?.id : undefined;
+  const latestMessageID = messages[messages.length - 1]?.id;
 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
   }, [incomingCall]);
+
+  useEffect(() => {
+    pendingMessageScrollRef.current = true;
+  }, [activeRoomID]);
+
+  useEffect(() => {
+    if (!latestMessageID) return;
+    pendingMessageScrollRef.current = true;
+    scrollMessagesToEnd(true);
+  }, [latestMessageID]);
 
   useEffect(() => {
     privateMessageSoundEnabledRef.current = privateMessageSoundEnabled;
@@ -1138,6 +1152,9 @@ export default function App() {
           setSelectedMember(null);
         }
       }
+      if (payload.type === "message:delivered") {
+        setMessages(current => applyDeliveryReceipt(current, payload.data));
+      }
       if (payload.type === "message:read") {
         setMessages(current => applyReadReceipt(current, payload.data));
         setUnreadRoomIDs(current => payload.data.readerId === session.userId ? current.filter(roomID => roomID !== payload.data.roomId) : current);
@@ -1355,6 +1372,14 @@ export default function App() {
     if (socketRef.current?.readyState !== WebSocket.OPEN) return false;
     socketRef.current.send(JSON.stringify({ type, data }));
     return true;
+  }
+
+  function scrollMessagesToEnd(animated: boolean) {
+    if (!pendingMessageScrollRef.current || messages.length === 0) return;
+    requestAnimationFrame(() => {
+      messagesListRef.current?.scrollToEnd({ animated });
+      pendingMessageScrollRef.current = false;
+    });
   }
 
   async function sendMessage(text = draft) {
@@ -2252,13 +2277,17 @@ export default function App() {
         )}
 
         <FlatList
+          ref={messagesListRef}
           data={messages}
           keyExtractor={item => item.id}
           contentContainerStyle={styles.messages}
+          onLayout={() => scrollMessagesToEnd(false)}
+          onContentSizeChange={() => scrollMessagesToEnd(false)}
           renderItem={({ item }) => {
             const mine = item.senderId === session.userId;
             const attachmentPreviewURI = attachmentPreviewURIs[item.id];
             const AttachmentIcon = item.attachment?.mimeType.startsWith("image/") ? ImageIcon : FileText;
+            const deliveryState = mine ? messageDeliveryState(item) : "none";
             return (
               <View style={[styles.messageGroup, mine ? styles.groupMine : styles.groupTheirs]}>
                 <Text style={[styles.sender, mine && styles.senderMine]}>{mine ? "You" : item.sender}</Text>
@@ -2286,12 +2315,16 @@ export default function App() {
                     <Text style={styles.messageText}>{item.text}</Text>
                   )}
                 </View>
-                <Text style={styles.timestamp}>
-                  {new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                </Text>
-                {mine && item.id === latestReadSentMessageID && (
-                  <Text style={styles.readReceipt}>Read</Text>
-                )}
+                <View style={[styles.messageMetaRow, mine && styles.messageMetaRowMine]}>
+                  <Text style={styles.timestamp}>
+                    {new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
+                  </Text>
+                  {mine && (
+                    <Text style={[styles.deliveryTicks, deliveryState === "read" && styles.deliveryTicksRead]}>
+                      {deliveryState === "sent" ? "✓" : "✓✓"}
+                    </Text>
+                  )}
+                </View>
               </View>
             );
           }}
@@ -2539,6 +2572,26 @@ function applyReadReceipt(current: Message[], receipt: { readerId: string; messa
   return changed ? nextMessages : current;
 }
 
+function applyDeliveryReceipt(current: Message[], receipt: { readerId: string; messageIds: string[]; deliveredAt: string }) {
+  if (receipt.messageIds.length === 0) return current;
+  const deliveredIDs = new Set(receipt.messageIds);
+  let changed = false;
+  const nextMessages = current.map(message => {
+    if (!deliveredIDs.has(message.id) || message.senderId === receipt.readerId || message.deliveredAt === receipt.deliveredAt) {
+      return message;
+    }
+    changed = true;
+    return { ...message, deliveredAt: receipt.deliveredAt };
+  });
+  return changed ? nextMessages : current;
+}
+
+function messageDeliveryState(message: Message) {
+  if (message.readAt) return "read";
+  if (message.deliveredAt) return "delivered";
+  return "sent";
+}
+
 async function encryptMessageText(roomID: string, text: string, messageKeySecret: string) {
   if (E2E_MODE) return text;
   const key = await deriveRoomMessageKey(roomID, messageKeySecret);
@@ -2698,6 +2751,7 @@ function messagesEqual(left: Message[], right: Message[]) {
       message.sender === other.sender &&
       message.text === other.text &&
       message.createdAt === other.createdAt &&
+      message.deliveredAt === other.deliveredAt &&
       message.readAt === other.readAt;
   });
 }
@@ -3902,15 +3956,25 @@ const styles = StyleSheet.create({
   timestamp: {
     color: "#77808b",
     fontSize: 11,
-    marginTop: 4,
     marginHorizontal: 4
   },
-  readReceipt: {
-    color: "#6d28d9",
-    fontSize: 11,
+  messageMetaRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 2,
+    marginTop: 4
+  },
+  messageMetaRowMine: {
+    justifyContent: "flex-end"
+  },
+  deliveryTicks: {
+    color: "#77808b",
+    fontSize: 12,
     fontWeight: "800",
-    marginTop: 2,
     marginHorizontal: 4
+  },
+  deliveryTicksRead: {
+    color: "#2563eb"
   },
   emojiRow: {
     flexDirection: "row",

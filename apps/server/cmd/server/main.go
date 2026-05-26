@@ -106,13 +106,14 @@ type member struct {
 }
 
 type message struct {
-	ID        string     `json:"id"`
-	RoomID    string     `json:"roomId"`
-	SenderID  string     `json:"senderId"`
-	Sender    string     `json:"sender"`
-	Text      string     `json:"text"`
-	CreatedAt time.Time  `json:"createdAt"`
-	ReadAt    *time.Time `json:"readAt,omitempty"`
+	ID          string     `json:"id"`
+	RoomID      string     `json:"roomId"`
+	SenderID    string     `json:"senderId"`
+	Sender      string     `json:"sender"`
+	Text        string     `json:"text"`
+	CreatedAt   time.Time  `json:"createdAt"`
+	DeliveredAt *time.Time `json:"deliveredAt,omitempty"`
+	ReadAt      *time.Time `json:"readAt,omitempty"`
 }
 
 type attachment struct {
@@ -1276,7 +1277,7 @@ func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(r.Context(), `
-select m.id, m.room_id, m.sender_id, m.sender_name, m.body, m.created_at, mr.read_at
+select m.id, m.room_id, m.sender_id, m.sender_name, m.body, m.created_at, mr.delivered_at, mr.read_at
 from messages m
 left join message_receipts mr on mr.message_id = m.id
   and m.sender_id = $2
@@ -1293,10 +1294,15 @@ limit 200`, roomID, userID)
 	history := make([]message, 0)
 	for rows.Next() {
 		var msg message
+		var deliveredAt sql.NullTime
 		var readAt sql.NullTime
-		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt, &readAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt, &deliveredAt, &readAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan messages failed"})
 			return
+		}
+		if deliveredAt.Valid {
+			deliveredAtTime := deliveredAt.Time
+			msg.DeliveredAt = &deliveredAtTime
 		}
 		if readAt.Valid {
 			readAtTime := readAt.Time
@@ -1364,6 +1370,20 @@ func (s *server) deliverMessages(w http.ResponseWriter, r *http.Request) {
 		slog.Error("mark messages delivered", "error", err)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark messages delivered failed"})
 		return
+	}
+	if len(deliveredIDs) > 0 {
+		envelope := outboundEnvelope{
+			Type: "message:delivered",
+			Data: map[string]any{
+				"roomId":      roomID,
+				"readerId":    req.UserID,
+				"messageIds":  deliveredIDs,
+				"deliveredAt": deliveredAt,
+			},
+		}
+		for _, recipient := range directMessageRecipients(roomID) {
+			s.publish(r.Context(), "user:"+recipient, envelope)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"messageIds": deliveredIDs, "deliveredAt": deliveredAt})
 }
