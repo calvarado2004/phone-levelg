@@ -165,6 +165,7 @@ Unit tests run without external services:
 
 ```sh
 go test ./apps/server/...
+npm run test:server:coverage
 ```
 
 Integration tests run against the local Docker Compose stack:
@@ -173,6 +174,12 @@ Integration tests run against the local Docker Compose stack:
 docker compose up -d postgres redis
 npm run test:server:integration
 ```
+
+Current measured coverage:
+
+- Unit-only server coverage: 34.6%.
+- Docker-backed server integration coverage: 75.8%.
+- The 85% target is not reached yet. The remaining gap is mainly startup wiring, dependency failure branches, and defensive database error paths, so future coverage should come from behavior-level API/storage/websocket tests rather than shallow line coverage.
 
 The tracked Compose stack intentionally uses only non-secret local defaults and must stay aligned with the OpenShift runtime service shape. Do not commit APNs keys, Firebase service-account JSON, real invite codes, or production LiveKit secrets. Put production-like local overrides in ignored files such as `docker-compose.prod.local.yml` plus ignored `.env.local` or `local-secrets/` files.
 

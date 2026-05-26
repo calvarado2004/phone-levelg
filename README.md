@@ -674,6 +674,8 @@ Individual checks:
 ```sh
 npm run typecheck
 npm run test:server
+npm run test:server:coverage
+npm run test:server:integration
 npm run test:openshift
 npm run test:deploy-assets
 npm run test:native-assets
@@ -698,6 +700,13 @@ What the tests cover:
 - Android Studio Node path handling
 - iOS Podfile presence
 - mobile screen rendering through Playwright
+
+Current measured backend coverage:
+
+- `npm run test:server:coverage`: 34.6% statement coverage from unit tests that do not require sockets, Postgres, or Redis.
+- `npm run test:server:integration`: 75.8% statement coverage when run against the local Docker Compose Postgres/Redis stack.
+
+The current project does not yet reach the requested 85% total coverage. The useful gap is mostly in startup code, dependency failure branches, and defensive database error handling. Do not inflate this with low-value tests that only assert implementation details; add coverage by exercising real API, queue, storage, websocket, and push-delivery behavior.
 
 Integration tests use the local Docker Compose stack:
 
