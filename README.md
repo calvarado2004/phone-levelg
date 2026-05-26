@@ -459,6 +459,16 @@ Run local state services:
 docker compose up -d
 ```
 
+The tracked `docker-compose.yml` is the local integration-test stack and is kept structurally aligned with the OpenShift runtime services: server, Postgres 18, Redis 7 with append-only persistence, and LiveKit with the same advertised node IP and RTC port range. It intentionally uses only non-secret local defaults.
+
+Run backend integration tests against that stack:
+
+```sh
+npm run test:server:integration
+```
+
+Do not put Apple APNs keys, Firebase service-account JSON, real invite codes, or production LiveKit secrets in the tracked Compose file. If a production-like local overlay is needed, create an ignored file such as `docker-compose.prod.local.yml` or `docker-compose.production.local.yml` and load secrets from ignored `.env.local` or `local-secrets/` files.
+
 Run the Go API:
 
 ```sh
@@ -689,12 +699,11 @@ What the tests cover:
 - iOS Podfile presence
 - mobile screen rendering through Playwright
 
-Integration tests that require live Postgres and Redis are opt-in:
+Integration tests use the local Docker Compose stack:
 
 ```sh
-INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' \
-INTEGRATION_REDIS_ADDR='localhost:6379' \
-go test ./apps/server/... -run Integration
+docker compose up -d postgres redis
+npm run test:server:integration
 ```
 
 The login-specific integration subset is useful before deploying identity changes:

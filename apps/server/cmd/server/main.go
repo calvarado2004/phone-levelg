@@ -753,36 +753,41 @@ func main() {
 	}
 	app.startPushWorkers(ctx)
 
+	router := app.routes()
+	slog.Info("starting private chat API", "port", cfg.port)
+	if err := http.ListenAndServe(":"+cfg.port, router); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		slog.Error("server stopped", "error", err)
+		os.Exit(1)
+	}
+}
+
+func (s *server) routes() chi.Router {
 	router := chi.NewRouter()
 	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{cfg.corsOrigin},
+		AllowedOrigins:   []string{s.cfg.corsOrigin},
 		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
 
-	router.Get("/healthz", app.health)
-	router.Post("/login", app.login)
-	router.Get("/members", app.members)
-	router.Post("/devices/register", app.registerDevice)
-	router.Delete("/devices/{deviceID}", app.deleteDevice)
-	router.Get("/direct/inbox", app.directInbox)
-	router.Get("/rooms/{roomID}/messages", app.messages)
-	router.Post("/rooms/{roomID}/messages", app.createMessage)
-	router.Post("/rooms/{roomID}/messages/delivered", app.deliverMessages)
-	router.Post("/rooms/{roomID}/messages/read", app.readMessages)
-	router.Delete("/rooms/{roomID}/messages", app.deleteMessages)
-	router.Post("/rooms/{roomID}/attachments", app.createAttachment)
-	router.Get("/rooms/{roomID}/attachments/{attachmentID}", app.getAttachment)
-	router.Post("/calls/token", app.callToken)
-	router.Get("/ws", app.websocket)
+	router.Get("/healthz", s.health)
+	router.Post("/login", s.login)
+	router.Get("/members", s.members)
+	router.Post("/devices/register", s.registerDevice)
+	router.Delete("/devices/{deviceID}", s.deleteDevice)
+	router.Get("/direct/inbox", s.directInbox)
+	router.Get("/rooms/{roomID}/messages", s.messages)
+	router.Post("/rooms/{roomID}/messages", s.createMessage)
+	router.Post("/rooms/{roomID}/messages/delivered", s.deliverMessages)
+	router.Post("/rooms/{roomID}/messages/read", s.readMessages)
+	router.Delete("/rooms/{roomID}/messages", s.deleteMessages)
+	router.Post("/rooms/{roomID}/attachments", s.createAttachment)
+	router.Get("/rooms/{roomID}/attachments/{attachmentID}", s.getAttachment)
+	router.Post("/calls/token", s.callToken)
+	router.Get("/ws", s.websocket)
 
-	slog.Info("starting private chat API", "port", cfg.port)
-	if err := http.ListenAndServe(":"+cfg.port, router); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("server stopped", "error", err)
-		os.Exit(1)
-	}
+	return router
 }
 
 func loadConfig() config {

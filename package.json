@@ -12,6 +12,8 @@
     "android:release-server": "./scripts/build-and-serve-android-release.sh",
     "typecheck": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./... && cd ../.. && npm run typecheck --workspaces --if-present",
     "test:server": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./...",
+    "test:server:coverage": "cd apps/server && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./... -coverprofile=/private/tmp/phone-levelg-server.cover && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go tool cover -func=/private/tmp/phone-levelg-server.cover",
+    "test:server:integration": "cd apps/server && INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' INTEGRATION_REDIS_ADDR='localhost:6379' GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go test ./... -coverprofile=/private/tmp/phone-levelg-server-integration.cover && GOCACHE=/private/tmp/phone-levelg-go-cache GOMODCACHE=/private/tmp/phone-levelg-go-mod go tool cover -func=/private/tmp/phone-levelg-server-integration.cover",
     "test:container": "docker build -f apps/server/Dockerfile .",
     "test:openshift": "node tests/openshift/validate-manifests.mjs",
     "test:deploy-assets": "node tests/deploy/validate-container-assets.mjs",

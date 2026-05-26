@@ -167,13 +167,14 @@ Unit tests run without external services:
 go test ./apps/server/...
 ```
 
-Integration tests are opt-in and require real Postgres and Redis endpoints:
+Integration tests run against the local Docker Compose stack:
 
 ```sh
-INTEGRATION_DATABASE_URL='postgres://phone_levelg:phone_levelg@localhost:5432/phone_levelg?sslmode=disable' \
-INTEGRATION_REDIS_ADDR='localhost:6379' \
-go test ./apps/server/... -run Integration
+docker compose up -d postgres redis
+npm run test:server:integration
 ```
+
+The tracked Compose stack intentionally uses only non-secret local defaults and must stay aligned with the OpenShift runtime service shape. Do not commit APNs keys, Firebase service-account JSON, real invite codes, or production LiveKit secrets. Put production-like local overrides in ignored files such as `docker-compose.prod.local.yml` plus ignored `.env.local` or `local-secrets/` files.
 
 The login-specific regression subset is:
 

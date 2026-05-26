@@ -342,6 +342,262 @@ func TestCallPushPayloadShapesAPNSAndFCM(t *testing.T) {
 	}
 }
 
+func TestLoadConfigUsesEnvAndFallbacks(t *testing.T) {
+	t.Setenv("PORT", " 5000 ")
+	t.Setenv("CORS_ORIGIN", "https://app.example")
+	t.Setenv("SHARED_INVITE_CODE", " prod ")
+	t.Setenv("LIVEKIT_API_KEY", "livekit-key")
+	t.Setenv("LIVEKIT_API_SECRET", "livekit-secret")
+	t.Setenv("FCM_PROJECT_ID", "phone-levelg")
+
+	cfg := loadConfig()
+	if cfg.port != "5000" || cfg.corsOrigin != "https://app.example" || cfg.sharedInviteCode != "prod" {
+		t.Fatalf("unexpected env-backed config: %#v", cfg)
+	}
+	if cfg.livekitAPIKey != "livekit-key" || cfg.livekitAPISecret != "livekit-secret" || cfg.fcmProjectID != "phone-levelg" {
+		t.Fatalf("expected LiveKit/FCM env values, got %#v", cfg)
+	}
+	if cfg.redisAddr != "localhost:6379" {
+		t.Fatalf("expected redis fallback, got %q", cfg.redisAddr)
+	}
+}
+
+func TestReadJSONRejectsMalformedBodies(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/test", strings.NewReader("{"))
+	rec := httptest.NewRecorder()
+
+	if readJSON(rec, req, &loginRequest{}) {
+		t.Fatal("expected malformed json to be rejected")
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected bad request, got %d", rec.Code)
+	}
+	if contentType := rec.Header().Get("content-type"); contentType != "application/json" {
+		t.Fatalf("expected json content type, got %q", contentType)
+	}
+}
+
+func TestCallTokenValidationAndJWTGrant(t *testing.T) {
+	app := &server{cfg: config{livekitAPIKey: "devkey", livekitAPISecret: "secret"}}
+
+	forbiddenBody, _ := json.Marshal(callTokenRequest{RoomID: "dm:alice:bob", Identity: "charlie", DisplayName: "Charlie"})
+	forbiddenReq := httptest.NewRequest(http.MethodPost, "/calls/token", bytes.NewReader(forbiddenBody))
+	forbiddenRec := httptest.NewRecorder()
+	app.callToken(forbiddenRec, forbiddenReq)
+	if forbiddenRec.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden direct-room token, got %d", forbiddenRec.Code)
+	}
+
+	body, _ := json.Marshal(callTokenRequest{RoomID: "dm:alice:bob", Identity: "alice", DisplayName: "Alice"})
+	req := httptest.NewRequest(http.MethodPost, "/calls/token", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	app.callToken(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected token ok, got %d: %s", rec.Code, rec.Body.String())
+	}
+	var response map[string]string
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode token response: %v", err)
+	}
+	if strings.Count(response["token"], ".") != 2 {
+		t.Fatalf("expected compact jwt, got %q", response["token"])
+	}
+}
+
+func TestRoutesWireCoreHandlers(t *testing.T) {
+	app := &server{cfg: config{corsOrigin: "*", livekitAPIKey: "devkey", livekitAPISecret: "secret"}}
+	router := app.routes()
+
+	body, _ := json.Marshal(callTokenRequest{RoomID: "home", Identity: "alice", DisplayName: "Alice"})
+	req := httptest.NewRequest(http.MethodPost, "/calls/token", bytes.NewReader(body))
+	req.Header.Set("Origin", "https://example.com")
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected routed call token ok, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("expected permissive CORS header, got %q", rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestFCMProviderSendsCallAndMessagePushes(t *testing.T) {
+	var requests []map[string]any
+	provider := &fcmProvider{
+		accessToken: "access-token",
+		endpoint:    "https://fcm.example/send",
+		client: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			if r.Method != http.MethodPost || r.URL.String() != "https://fcm.example/send" {
+				t.Fatalf("unexpected fcm request: %s %s", r.Method, r.URL.String())
+			}
+			if r.Header.Get("authorization") != "Bearer access-token" {
+				t.Fatalf("unexpected authorization header: %q", r.Header.Get("authorization"))
+			}
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode fcm body: %v", err)
+			}
+			requests = append(requests, body)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Status:     "200 OK",
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+			}, nil
+		})},
+	}
+
+	if err := provider.SendCallPush(context.Background(), callPushPayload{CallID: "call-1", RoomID: "dm:alice:bob", SenderID: "alice", Sender: "Alice", Mode: "voice"}, pushDevice{PushToken: "fcm-token"}); err != nil {
+		t.Fatalf("send call push: %v", err)
+	}
+	if err := provider.SendMessagePush(context.Background(), messagePushPayload{MessageID: "msg-1", RoomID: "dm:alice:bob", SenderID: "alice", Sender: "Alice", Preview: "New private message"}, pushDevice{PushToken: "fcm-token"}); err != nil {
+		t.Fatalf("send message push: %v", err)
+	}
+	if len(requests) != 2 {
+		t.Fatalf("expected two fcm requests, got %d", len(requests))
+	}
+	callMessage := requests[0]["message"].(map[string]any)
+	if _, hasNotification := callMessage["notification"]; hasNotification {
+		t.Fatalf("call push must remain data-only: %#v", callMessage)
+	}
+	message := requests[1]["message"].(map[string]any)
+	if message["notification"] == nil {
+		t.Fatalf("message push should include notification payload: %#v", message)
+	}
+}
+
+func TestFCMProviderReturnsHTTPError(t *testing.T) {
+	provider := &fcmProvider{
+		accessToken: "access-token",
+		endpoint:    "https://fcm.example/send",
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return &http.Response{
+				StatusCode: http.StatusBadRequest,
+				Status:     "400 Bad Request",
+				Body:       io.NopCloser(strings.NewReader(`{"error":"bad"}`)),
+			}, nil
+		})},
+	}
+	if err := provider.SendMessagePush(context.Background(), messagePushPayload{MessageID: "msg-1"}, pushDevice{PushToken: "fcm-token"}); err == nil {
+		t.Fatal("expected fcm http error")
+	}
+}
+
+func TestAPNSProviderSendsHeadersAndHandlesErrors(t *testing.T) {
+	provider := newAPNSProvider(config{
+		apnsTeamID:     "TEAMID",
+		apnsKeyID:      "KEYID",
+		apnsBundleID:   "io.levelg.phone",
+		apnsPrivateKey: testAPNSPrivateKeyPEM(t),
+		apnsEndpoint:   "https://api.sandbox.push.apple.com",
+	})
+	if provider == nil {
+		t.Fatal("expected APNs provider")
+	}
+	var paths []string
+	var pushTypes []string
+	provider.client = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		paths = append(paths, r.URL.Path)
+		pushTypes = append(pushTypes, r.Header.Get("apns-push-type"))
+		if !strings.HasPrefix(r.Header.Get("authorization"), "bearer ") {
+			t.Fatalf("missing APNs bearer authorization: %#v", r.Header)
+		}
+		if r.Header.Get("apns-priority") != "10" {
+			t.Fatalf("unexpected APNs priority: %q", r.Header.Get("apns-priority"))
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Status:     "200 OK",
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+		}, nil
+	})}
+
+	if err := provider.SendCallPush(context.Background(), callPushPayload{CallID: "call-1", Sender: "Alice", Mode: "video"}, pushDevice{PushToken: "voip-token", PushTokenType: "apns-voip"}); err != nil {
+		t.Fatalf("send apns call push: %v", err)
+	}
+	if err := provider.SendMessagePush(context.Background(), messagePushPayload{MessageID: "msg-1", Sender: "Alice", Preview: "New private message"}, pushDevice{PushToken: "alert-token", PushTokenType: "apns"}); err != nil {
+		t.Fatalf("send apns message push: %v", err)
+	}
+	if len(paths) != 2 || paths[0] != "/3/device/voip-token" || paths[1] != "/3/device/alert-token" {
+		t.Fatalf("unexpected APNs paths: %#v", paths)
+	}
+	if pushTypes[0] != "voip" || pushTypes[1] != "alert" {
+		t.Fatalf("unexpected APNs push types: %#v", pushTypes)
+	}
+
+	provider.client = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusBadRequest,
+			Status:     "400 Bad Request",
+			Body:       io.NopCloser(strings.NewReader(`{"reason":"BadDeviceToken"}`)),
+		}, nil
+	})}
+	err := provider.SendMessagePush(context.Background(), messagePushPayload{MessageID: "msg-2"}, pushDevice{PushToken: "bad-token", PushTokenType: "apns"})
+	if err == nil || !strings.Contains(err.Error(), "BadDeviceToken") {
+		t.Fatalf("expected APNs status detail, got %v", err)
+	}
+}
+
+func TestCompositePushDispatcherRoutesByTokenType(t *testing.T) {
+	fcmRequests := 0
+	fcm := &fcmProvider{
+		accessToken: "token",
+		endpoint:    "https://fcm.example/send",
+		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			fcmRequests++
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Body: io.NopCloser(strings.NewReader(`{}`))}, nil
+		})},
+	}
+	dispatcher := compositePushDispatcher{fcm: fcm}
+	devices := []pushDevice{
+		{DeviceID: "android", PushToken: "fcm-token", PushTokenType: "fcm"},
+		{DeviceID: "ios-alert", PushToken: "apns-token", PushTokenType: "apns"},
+		{DeviceID: "ios-voip", PushToken: "voip-token", PushTokenType: "apns-voip"},
+		{DeviceID: "unknown", PushToken: "other", PushTokenType: "expo"},
+	}
+
+	if err := dispatcher.DispatchCallPush(context.Background(), callPushPayload{CallID: "call-1"}, devices); err != nil {
+		t.Fatalf("dispatch call push: %v", err)
+	}
+	if err := dispatcher.DispatchMessagePush(context.Background(), messagePushPayload{MessageID: "msg-1"}, devices); err != nil {
+		t.Fatalf("dispatch message push: %v", err)
+	}
+	if fcmRequests != 2 {
+		t.Fatalf("expected fcm call and message requests only, got %d", fcmRequests)
+	}
+}
+
+func TestNoopPushDispatcherIgnoresMessagePush(t *testing.T) {
+	if err := (noopPushDispatcher{}).DispatchMessagePush(context.Background(), messagePushPayload{}, []pushDevice{{PushTokenType: "apns"}}); err != nil {
+		t.Fatalf("noop message dispatcher must not fail: %v", err)
+	}
+}
+
+func TestCredentialParsingRejectsInvalidKeys(t *testing.T) {
+	if _, err := parseAPNSPrivateKey("not pem"); err == nil {
+		t.Fatal("expected invalid APNs key to fail")
+	}
+	ecdsaKey := testAPNSPrivateKeyPEM(t)
+	if _, err := parseRSAPrivateKey(ecdsaKey); err == nil {
+		t.Fatal("expected ECDSA key to fail RSA parsing")
+	}
+	if _, err := parseGoogleServiceAccount(`{"project_id":"","client_email":"","private_key":""}`); err == nil {
+		t.Fatal("expected incomplete service account to fail")
+	}
+	if _, err := parseGoogleServiceAccount(`{`); err == nil {
+		t.Fatal("expected malformed service account json to fail")
+	}
+}
+
+func TestJWTUnsignedRejectsUnmarshalableValues(t *testing.T) {
+	if _, err := jwtUnsigned(map[string]any{"bad": make(chan int)}, map[string]string{"sub": "alice"}); err == nil {
+		t.Fatal("expected unmarshalable header to fail")
+	}
+	if _, err := jwtUnsigned(map[string]string{"alg": "none"}, map[string]any{"bad": make(chan int)}); err == nil {
+		t.Fatal("expected unmarshalable claims to fail")
+	}
+}
+
 func TestRetryEventuallySucceeds(t *testing.T) {
 	attempts := 0
 	err := retry(context.Background(), "test", func(context.Context) error {
@@ -950,13 +1206,7 @@ func TestIntegrationDirectMessageReachesRecipientUserChannelOnly(t *testing.T) {
 		t.Fatalf("send direct message: %v", err)
 	}
 
-	var received outboundEnvelope
-	if err := bob.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set bob deadline: %v", err)
-	}
-	if err := bob.ReadJSON(&received); err != nil {
-		t.Fatalf("bob did not receive private message on user channel: %v", err)
-	}
+	received := readEventType(t, bob, "message:new", 2*time.Second)
 	if received.Type != "message:new" {
 		t.Fatalf("expected message:new, got %q", received.Type)
 	}
@@ -964,10 +1214,7 @@ func TestIntegrationDirectMessageReachesRecipientUserChannelOnly(t *testing.T) {
 	if err := charlie.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 		t.Fatalf("set charlie deadline: %v", err)
 	}
-	var leaked outboundEnvelope
-	if err := charlie.ReadJSON(&leaked); err == nil {
-		t.Fatalf("non-participant received private event: %#v", leaked)
-	}
+	assertNoEventType(t, charlie, "message:new", 300*time.Millisecond)
 }
 
 func TestIntegrationCreateDirectMessagePersistsAndStaysPrivate(t *testing.T) {
@@ -1252,6 +1499,185 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	}
 }
 
+func TestIntegrationHandlerValidationAndLastReadReceipt(t *testing.T) {
+	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
+	redisAddr := os.Getenv("INTEGRATION_REDIS_ADDR")
+	if databaseURL == "" || redisAddr == "" {
+		t.Skip("set INTEGRATION_DATABASE_URL and INTEGRATION_REDIS_ADDR to run integration tests")
+	}
+
+	ctx := context.Background()
+	db, err := pgxpool.New(ctx, databaseURL)
+	if err != nil {
+		t.Fatalf("connect postgres: %v", err)
+	}
+	defer db.Close()
+
+	if err := migrate(ctx, db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	resetIntegrationState(t, ctx, db)
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	defer rdb.Close()
+
+	app := &server{
+		cfg:   config{sharedInviteCode: "home", livekitAPIKey: "devkey", livekitAPISecret: "secret"},
+		db:    db,
+		redis: rdb,
+		push:  noopPushDispatcher{},
+	}
+	for _, item := range []member{
+		{ID: "alice", DisplayName: "Alice"},
+		{ID: "bob", DisplayName: "Bob"},
+		{ID: "charlie", DisplayName: "Charlie"},
+	} {
+		_, err := db.Exec(ctx, `insert into users (id, display_name) values ($1, $2)`, item.ID, item.DisplayName)
+		if err != nil {
+			t.Fatalf("insert user %s: %v", item.ID, err)
+		}
+	}
+
+	healthReq := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	healthRec := httptest.NewRecorder()
+	app.health(healthRec, healthReq)
+	if healthRec.Code != http.StatusOK {
+		t.Fatalf("expected health ok, got %d: %s", healthRec.Code, healthRec.Body.String())
+	}
+
+	roomID := directMessageRecipientsRoom("alice", "bob")
+	first, ok := app.storeAndPublishMessage(ctx, "room:"+roomID, roomID, "alice", "Alice", "first")
+	if !ok {
+		t.Fatal("expected first message to store")
+	}
+	second, ok := app.storeAndPublishMessage(ctx, "room:"+roomID, roomID, "alice", "Alice", "second")
+	if !ok {
+		t.Fatal("expected second message to store")
+	}
+
+	readBody, _ := json.Marshal(messageReceiptRequest{UserID: "bob", LastReadMessageID: second.ID})
+	readReq := requestWithRoom(http.MethodPost, "/rooms/"+roomID+"/messages/read", roomID, bytes.NewReader(readBody))
+	readRec := httptest.NewRecorder()
+	app.readMessages(readRec, readReq)
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("expected last-read receipt ok, got %d: %s", readRec.Code, readRec.Body.String())
+	}
+	var readPayload struct {
+		MessageIDs []string `json:"messageIds"`
+	}
+	if err := json.Unmarshal(readRec.Body.Bytes(), &readPayload); err != nil {
+		t.Fatalf("decode read payload: %v", err)
+	}
+	if len(readPayload.MessageIDs) != 2 {
+		t.Fatalf("expected lastReadMessageId to mark both messages, got %#v", readPayload.MessageIDs)
+	}
+	if !containsAll(readPayload.MessageIDs, []string{first.ID, second.ID}) {
+		t.Fatalf("expected both message ids to be read, got %#v", readPayload.MessageIDs)
+	}
+
+	badCases := []struct {
+		name   string
+		run    func(*httptest.ResponseRecorder)
+		status int
+	}{
+		{
+			name: "register unknown user",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(deviceRegistrationRequest{UserID: "nobody", DeviceID: "phone", Platform: "ios", PushToken: "token", PushTokenType: "apns"})
+				app.registerDevice(rec, httptest.NewRequest(http.MethodPost, "/devices/register", bytes.NewReader(body)))
+			},
+			status: http.StatusNotFound,
+		},
+		{
+			name: "register unsupported token",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(deviceRegistrationRequest{UserID: "alice", DeviceID: "phone", Platform: "ios", PushToken: "token", PushTokenType: "bad"})
+				app.registerDevice(rec, httptest.NewRequest(http.MethodPost, "/devices/register", bytes.NewReader(body)))
+			},
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "messages forbidden",
+			run: func(rec *httptest.ResponseRecorder) {
+				app.messages(rec, requestWithRoom(http.MethodGet, "/rooms/"+roomID+"/messages?userId=charlie", roomID, nil))
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "create message forbidden",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(createMessageRequest{SenderID: "charlie", DisplayName: "Charlie", Text: "nope"})
+				app.createMessage(rec, requestWithRoom(http.MethodPost, "/rooms/"+roomID+"/messages", roomID, bytes.NewReader(body)))
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "deliver home rejected",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(messageReceiptRequest{UserID: "bob"})
+				app.deliverMessages(rec, requestWithRoom(http.MethodPost, "/rooms/home/messages/delivered", "home", bytes.NewReader(body)))
+			},
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "read forbidden",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(messageReceiptRequest{UserID: "charlie"})
+				app.readMessages(rec, requestWithRoom(http.MethodPost, "/rooms/"+roomID+"/messages/read", roomID, bytes.NewReader(body)))
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "attachment invalid base64",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(createAttachmentRequest{SenderID: "alice", Data: "not-base64"})
+				app.createAttachment(rec, requestWithRoom(http.MethodPost, "/rooms/"+roomID+"/attachments", roomID, bytes.NewReader(body)))
+			},
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "attachment home rejected",
+			run: func(rec *httptest.ResponseRecorder) {
+				body, _ := json.Marshal(createAttachmentRequest{SenderID: "alice", Data: base64.StdEncoding.EncodeToString([]byte("bytes"))})
+				app.createAttachment(rec, requestWithRoom(http.MethodPost, "/rooms/home/attachments", "home", bytes.NewReader(body)))
+			},
+			status: http.StatusBadRequest,
+		},
+		{
+			name: "get attachment forbidden",
+			run: func(rec *httptest.ResponseRecorder) {
+				req := requestWithRoom(http.MethodGet, "/rooms/"+roomID+"/attachments/missing?userId=charlie", roomID, nil)
+				chi.RouteContext(req.Context()).URLParams.Add("attachmentID", "missing")
+				app.getAttachment(rec, req)
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "delete direct forbidden",
+			run: func(rec *httptest.ResponseRecorder) {
+				app.deleteMessages(rec, requestWithRoom(http.MethodDelete, "/rooms/"+roomID+"/messages?userId=charlie", roomID, nil))
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "call token missing payload",
+			run: func(rec *httptest.ResponseRecorder) {
+				app.callToken(rec, httptest.NewRequest(http.MethodPost, "/calls/token", strings.NewReader(`{}`)))
+			},
+			status: http.StatusBadRequest,
+		},
+	}
+	for _, tc := range badCases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			tc.run(rec)
+			if rec.Code != tc.status {
+				t.Fatalf("expected %d, got %d: %s", tc.status, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
 func TestIntegrationDirectCallRingCarriesRoomAndStaysPrivate(t *testing.T) {
 	databaseURL := os.Getenv("INTEGRATION_DATABASE_URL")
 	redisAddr := os.Getenv("INTEGRATION_REDIS_ADDR")
@@ -1327,13 +1753,7 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 		t.Fatalf("send direct call ring: %v", err)
 	}
 
-	var received outboundEnvelope
-	if err := bob.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set bob deadline: %v", err)
-	}
-	if err := bob.ReadJSON(&received); err != nil {
-		t.Fatalf("bob did not receive private call ring on user channel: %v", err)
-	}
+	received := readEventType(t, bob, "call:ring", 2*time.Second)
 	if received.Type != "call:ring" {
 		t.Fatalf("expected call:ring, got %q", received.Type)
 	}
@@ -1392,10 +1812,7 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	if err := charlie.SetReadDeadline(time.Now().Add(300 * time.Millisecond)); err != nil {
 		t.Fatalf("set charlie deadline: %v", err)
 	}
-	var leaked outboundEnvelope
-	if err := charlie.ReadJSON(&leaked); err == nil {
-		t.Fatalf("non-participant received private call ring: %#v", leaked)
-	}
+	assertNoEventType(t, charlie, "call:ring", 300*time.Millisecond)
 }
 
 func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
@@ -1453,13 +1870,7 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 		t.Fatalf("send lobby call ring: %v", err)
 	}
 
-	var received outboundEnvelope
-	if err := bob.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set bob deadline: %v", err)
-	}
-	if err := bob.ReadJSON(&received); err != nil {
-		t.Fatalf("bob did not receive lobby call ring on user channel: %v", err)
-	}
+	received := readEventType(t, bob, "call:ring", 2*time.Second)
 	if received.Type != "call:ring" {
 		t.Fatalf("expected call:ring, got %q", received.Type)
 	}
@@ -1488,13 +1899,7 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 		t.Fatalf("send lobby call end: %v", err)
 	}
 
-	var ended outboundEnvelope
-	if err := bob.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set bob end deadline: %v", err)
-	}
-	if err := bob.ReadJSON(&ended); err != nil {
-		t.Fatalf("bob did not receive lobby call end on user channel: %v", err)
-	}
+	ended := readEventType(t, bob, "call:end", 2*time.Second)
 	if ended.Type != "call:end" {
 		t.Fatalf("expected call:end, got %q", ended.Type)
 	}
@@ -1519,13 +1924,7 @@ func TestIntegrationLobbyCallRingReachesMembersOnUserChannel(t *testing.T) {
 		t.Fatalf("send lobby call reject: %v", err)
 	}
 
-	var rejected outboundEnvelope
-	if err := alice.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
-		t.Fatalf("set alice reject deadline: %v", err)
-	}
-	if err := alice.ReadJSON(&rejected); err != nil {
-		t.Fatalf("alice did not receive lobby call rejection on user channel: %v", err)
-	}
+	rejected := readEventType(t, alice, "call:reject", 2*time.Second)
 	if rejected.Type != "call:reject" {
 		t.Fatalf("expected call:reject, got %q", rejected.Type)
 	}
@@ -1583,6 +1982,13 @@ func dialTestWebSocket(t *testing.T, serverURL, roomID, userID, displayName stri
 	return conn
 }
 
+func requestWithRoom(method, target, roomID string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	routeCtx := chi.NewRouteContext()
+	routeCtx.URLParams.Add("roomID", roomID)
+	return req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, routeCtx))
+}
+
 func drainJoinedEvents(t *testing.T, conn *websocket.Conn, count int) {
 	t.Helper()
 	for i := 0; i < count; i++ {
@@ -1594,6 +2000,56 @@ func drainJoinedEvents(t *testing.T, conn *websocket.Conn, count int) {
 			t.Fatalf("drain joined event: %v", err)
 		}
 	}
+}
+
+func readEventType(t *testing.T, conn *websocket.Conn, eventType string, timeout time.Duration) outboundEnvelope {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var event outboundEnvelope
+		if err := conn.ReadJSON(&event); err != nil {
+			t.Fatalf("read %s event: %v", eventType, err)
+		}
+		if event.Type == eventType {
+			return event
+		}
+	}
+	t.Fatalf("timed out waiting for %s event", eventType)
+	return outboundEnvelope{}
+}
+
+func assertNoEventType(t *testing.T, conn *websocket.Conn, eventType string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := conn.SetReadDeadline(deadline); err != nil {
+			t.Fatalf("set read deadline: %v", err)
+		}
+		var event outboundEnvelope
+		err := conn.ReadJSON(&event)
+		if err != nil {
+			return
+		}
+		if event.Type == eventType {
+			t.Fatalf("unexpected %s event: %#v", eventType, event)
+		}
+	}
+}
+
+func containsAll(values []string, expected []string) bool {
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		seen[value] = true
+	}
+	for _, value := range expected {
+		if !seen[value] {
+			return false
+		}
+	}
+	return true
 }
 
 func directMessageRecipientsRoom(firstID, secondID string) string {

@@ -14,8 +14,10 @@ services:
     ports:
       - "4000:4000"
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   livekit:
     image: docker.io/livekit/livekit-server:latest
@@ -38,11 +40,25 @@ services:
       - "5432:5432"
     volumes:
       - postgres18-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U phone_levelg -d phone_levelg"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
   redis:
     image: docker.io/library/redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
+    volumes:
+      - redis7-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
 
 volumes:
   postgres18-data:
+  redis7-data:

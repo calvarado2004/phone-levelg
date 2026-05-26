@@ -15,5 +15,7 @@ apps/mobile/.env.local
 apps/mobile/android/app/google-services.json
 GoogleService-Info.plist
 deploy/openshift/*.local.yaml
+docker-compose.prod*.yml
+docker-compose.production*.yml
 local-secrets/
 *.p8
