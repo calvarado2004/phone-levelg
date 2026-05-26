@@ -437,6 +437,8 @@ Current network plan:
 
 The OpenShift service receives a MetalLB IP from the libvirt network. The host runs a small `socat` forwarder from `192.168.1.88` to that MetalLB IP; see `deploy/openshift/livekit-host-forward.sh`.
 
+The forwarder should normally show one listener set: two TCP listeners and one UDP listener for each media port. The UDP listeners use a 30 second idle timeout so per-client relay workers are reaped after a call path closes. If `systemctl status phone-levelg-livekit-forward.service` shows many duplicate stale `socat` children for the same UDP ports, restart the service before validating calls.
+
 The app/backend integration point is already present: the backend issues LiveKit JWTs from `/calls/token`.
 
 Native full-screen incoming-call plumbing is implemented through APNs/PushKit/CallKit on iOS and FCM high-priority data messages plus an Android full-screen call activity. Private-message notifications use regular APNs alert pushes on iOS and FCM on Android. The deployed backend caches APNs provider tokens, retries APNs throttling/server errors, and processes push sends through an async queue so message persistence is not blocked by provider latency.
@@ -644,6 +646,8 @@ displayName
 Returns a LiveKit JWT for the requested room.
 
 The current mobile call path verifies signaling, LiveKit token minting, room join, microphone/camera permissions, full-screen call UI, remote video rendering, and local camera preview.
+
+Android publishes video with constrained 640x360 at 15 fps capture, no simulcast, and a bounded publish timeout before falling back to voice. iOS keeps the 1280x720 at 30 fps camera path required by the native guardrails.
 
 ## Testing Strategy
 

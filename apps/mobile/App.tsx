@@ -140,6 +140,11 @@ const INCOMING_CALL_CHANNEL_ID = "incoming-calls";
 const PRIVATE_MESSAGE_CHANNEL_ID = "private-messages";
 const DEFAULT_RINGTONE_SOUND = "rockstar.mp3";
 const PRIVATE_MESSAGE_SOUND = Platform.OS === "android" ? "message_notification.mp3" : "message-notification.mp3";
+const ANDROID_CALL_VIDEO_CAPTURE_OPTIONS = { facingMode: "user" as const, resolution: { width: 640, height: 360, frameRate: 15 } };
+const CALL_VIDEO_PUBLISH_OPTIONS = Platform.OS === "android"
+  ? { simulcast: false, backupCodec: false as const, videoEncoding: { maxBitrate: 650_000, maxFramerate: 15 } }
+  : undefined;
+const CALL_VIDEO_PUBLISH_TIMEOUT_MS = Platform.OS === "android" ? 12_000 : 18_000;
 const ENCRYPTED_MESSAGE_PREFIX = "plgenc:v1:";
 const ATTACHMENT_MESSAGE_PREFIX = "plgattach:v1:";
 const ENCRYPTED_MESSAGE_UNAVAILABLE = "Encrypted message unavailable";
@@ -1680,13 +1685,28 @@ export default function App() {
       await room.localParticipant.setMicrophoneEnabled(true);
       if (mode === "video") {
         try {
-          const cameraPublication = await room.localParticipant.setCameraEnabled(true, { facingMode: "user", resolution: { width: 1280, height: 720, frameRate: 30 } });
+          await delay(250);
+          if (roomRef.current !== room) return;
+          const cameraPublication = Platform.OS === "android"
+            ? await withTimeout(
+              room.localParticipant.setCameraEnabled(true, ANDROID_CALL_VIDEO_CAPTURE_OPTIONS, CALL_VIDEO_PUBLISH_OPTIONS),
+              CALL_VIDEO_PUBLISH_TIMEOUT_MS,
+              "Camera publishing timed out."
+            )
+            : await withTimeout(
+              room.localParticipant.setCameraEnabled(true, { facingMode: "user", resolution: { width: 1280, height: 720, frameRate: 30 } }),
+              CALL_VIDEO_PUBLISH_TIMEOUT_MS,
+              "Camera publishing timed out."
+            );
           if (isVideoTrack(cameraPublication?.track)) {
             setLocalVideoTrack(cameraPublication.track);
           }
           setCameraFacingMode("user");
           syncVideoTracks(room);
         } catch {
+          if (roomRef.current === room) {
+            await room.localParticipant.setCameraEnabled(false).catch(() => undefined);
+          }
           setCallMode("voice");
           Alert.alert("Video unavailable", "The call is connected with audio. Camera publishing failed on this device.");
         }
@@ -1915,7 +1935,11 @@ export default function App() {
     try {
       setLocalVideoTrack(undefined);
       const cameraPublication = room.localParticipant.getTrackPublication(Track.Source.Camera);
-      await cameraPublication?.videoTrack?.restartTrack({ facingMode: nextFacingMode, resolution: { width: 1280, height: 720, frameRate: 30 } });
+      if (Platform.OS === "android") {
+        await cameraPublication?.videoTrack?.restartTrack({ ...ANDROID_CALL_VIDEO_CAPTURE_OPTIONS, facingMode: nextFacingMode });
+      } else {
+        await cameraPublication?.videoTrack?.restartTrack({ facingMode: nextFacingMode, resolution: { width: 1280, height: 720, frameRate: 30 } });
+      }
       setCameraFacingMode(nextFacingMode);
       syncVideoTracks(room);
       setTimeout(() => {
@@ -2587,6 +2611,18 @@ async function fetchJSON(url: string, init?: RequestInit) {
 
 function delay(ms: number) {
   return new Promise<void>(resolve => setTimeout(resolve, ms));
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string) {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 function getQueryParam(name: string) {

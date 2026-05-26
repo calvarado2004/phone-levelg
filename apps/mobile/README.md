@@ -17,6 +17,7 @@ React Native / Expo client for iOS and Android.
 - Quick emoji reactions.
 - Compact cat meme quick messages.
 - Voice/video call join through LiveKit.
+- Android video calls publish a constrained non-simulcast camera stream and fall back to voice if camera publication times out.
 - 30-day local session persistence.
 - Header logout.
 - User photos from Google profile pictures with initials fallback.
@@ -42,6 +43,8 @@ For emulator-only local testing, enter the Docker Compose API URL in the server 
 
 Native release builds default LiveKit to `ws://192.168.1.88:7880` so Android and iOS use the same reachable WebRTC endpoint. Keep local LiveKit configured with that node IP and the mapped UDP range before validating calls.
 
+Android camera publication is intentionally lower than iOS: 640x360 at 15 fps, no simulcast, and a publish timeout with voice fallback. iOS keeps the exact 1280x720 at 30 fps camera request used by the native build guardrails.
+
 ## Installation
 
 Always install release builds on Android emulators, Android devices, iOS simulators, and iOS devices. Do not use debug builds for validation unless you are specifically debugging Metro or native development tooling.
@@ -61,6 +64,8 @@ Direct chats can be deleted from the selected private conversation. Deletion cle
 New message bodies are encrypted before they are sent to the backend. The server stores and relays opaque `plgenc:v1` envelopes, and this app decrypts history and live websocket messages locally. Existing plaintext rows remain readable during rollout.
 
 Direct message delivery and read state are separate. The app acknowledges delivered direct messages when it receives them over WebSocket or direct inbox refresh so the server can consume pending APNs/FCM message delivery work. It sends read receipts only when the direct chat is visible, and the sender sees a single `Read` marker on the latest read sent message.
+
+Sent direct messages show delivery state beside the timestamp: one tick while accepted by the app, two ticks after the peer has received the message, and the read marker after the visible peer chat reports the message as read.
 
 Photo and document attachments are available only inside 1-1 chats. File bytes are loaded from picker-provided base64 data when available, with app-cache/content URI fallbacks, then encrypted locally before upload. Filename/type metadata is carried inside the encrypted `plgattach:v1` chat message so the backend only stores opaque blobs.
 

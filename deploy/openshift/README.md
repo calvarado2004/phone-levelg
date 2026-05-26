@@ -87,3 +87,5 @@ sudo -E ./deploy/openshift/livekit-host-forward.sh
 ```
 
 Do not leave stale DNAT rules for the same host ports active while this forwarder is running. Inbound packets must hit the local `socat` listeners on `7880`, `7881`, and `50100-50120/UDP`.
+
+The service should normally have one listener set: two TCP listeners and one UDP listener for each port in `50100-50120`. UDP forwarding uses `socat -T 30` by default to clean up per-client relay workers after calls close. If `systemctl status phone-levelg-livekit-forward.service` shows a large number of duplicate UDP children, restart the service before validating WebRTC publish behavior.
