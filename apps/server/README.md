@@ -8,7 +8,6 @@ Go backend for the private messaging and call-token API.
 - Reuse users by normalized email while allowing duplicate display names.
 - Store users, joined members, opaque encrypted message envelopes, and encrypted attachment blobs in Postgres.
 - Keep direct chat rooms private to their two participants.
-- Track direct-message pending/read receipts so opened chats consume unread inbox state.
 - Delete direct chat history when requested by a participant.
 - Broadcast live chat, member join, and call events through Redis pub/sub.
 - Register native APNs/PushKit/FCM device tokens.
@@ -51,23 +50,6 @@ Response:
 Returns the latest 200 messages for a room in chronological order. New mobile clients write encrypted `plgenc:v1` envelopes in the `text` field and decrypt them locally.
 
 For 1-1 rooms (`dm:{userA}:{userB}`), callers must include `?userId=...`; only the two room members can read the history.
-
-Messages sent by the caller include `readAt` once the other direct-room participant has marked them read.
-
-### `POST /rooms/{roomID}/messages/read`
-
-Marks direct-chat messages read for the given user and consumes their pending inbox rows.
-
-Request:
-
-```json
-{
-  "userId": "bob@example.com",
-  "messageIds": ["message-id"]
-}
-```
-
-If `messageIds` is empty, every unread message in that direct room for the user is marked read. The server publishes a `message:read` WebSocket event to both direct-room participants.
 
 ### `POST /rooms/{roomID}/attachments`
 

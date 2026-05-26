@@ -125,18 +125,6 @@ func TestDirectRoomAccessRequiresParticipant(t *testing.T) {
 	}
 }
 
-func TestSanitizeMessageIDsTrimsDeduplicatesAndRejectsInvalidValues(t *testing.T) {
-	longID := strings.Repeat("a", 129)
-	cleaned := sanitizeMessageIDs([]string{" message-1 ", "", "message-1", longID, "message-2"})
-
-	if len(cleaned) != 2 || cleaned[0] != "message-1" || cleaned[1] != "message-2" {
-		t.Fatalf("unexpected sanitized message ids: %#v", cleaned)
-	}
-	if empty := sanitizeMessageIDs(nil); len(empty) != 0 {
-		t.Fatalf("expected nil input to produce empty slice, got %#v", empty)
-	}
-}
-
 func TestNormalizeAvatarURLAllowsOnlyHTTPS(t *testing.T) {
 	if got := normalizeAvatarURL(" https://example.com/avatar.png "); got != "https://example.com/avatar.png" {
 		t.Fatalf("expected https avatar URL, got %q", got)
@@ -1075,60 +1063,6 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	}
 	if len(inboxPayload.Messages) != 1 || inboxPayload.Messages[0].SenderID != "alice" || inboxPayload.Messages[0].Text != encryptedEnvelope {
 		t.Fatalf("unexpected inbox payload: %#v", inboxPayload.Messages)
-	}
-
-	readBody, _ := json.Marshal(readMessagesRequest{UserID: "bob", MessageIDs: []string{inboxPayload.Messages[0].ID}})
-	readReq := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages/read", bytes.NewReader(readBody))
-	readRouteCtx := chi.NewRouteContext()
-	readRouteCtx.URLParams.Add("roomID", roomID)
-	readReq = readReq.WithContext(context.WithValue(readReq.Context(), chi.RouteCtxKey, readRouteCtx))
-	readRec := httptest.NewRecorder()
-	app.readMessages(readRec, readReq)
-	if readRec.Code != http.StatusOK {
-		t.Fatalf("expected read receipt ok, got %d: %s", readRec.Code, readRec.Body.String())
-	}
-	var readPayload struct {
-		MessageIDs []string  `json:"messageIds"`
-		ReadAt     time.Time `json:"readAt"`
-	}
-	if err := json.Unmarshal(readRec.Body.Bytes(), &readPayload); err != nil {
-		t.Fatalf("decode read receipt: %v", err)
-	}
-	if len(readPayload.MessageIDs) != 1 || readPayload.MessageIDs[0] != inboxPayload.Messages[0].ID || readPayload.ReadAt.IsZero() {
-		t.Fatalf("unexpected read receipt payload: %#v", readPayload)
-	}
-	inboxAfterReadReq := httptest.NewRequest(http.MethodGet, "/direct/inbox?userId=bob", nil)
-	inboxAfterReadRec := httptest.NewRecorder()
-	app.directInbox(inboxAfterReadRec, inboxAfterReadReq)
-	if inboxAfterReadRec.Code != http.StatusOK {
-		t.Fatalf("expected inbox after read ok, got %d: %s", inboxAfterReadRec.Code, inboxAfterReadRec.Body.String())
-	}
-	var inboxAfterReadPayload struct {
-		Messages []message `json:"messages"`
-	}
-	if err := json.Unmarshal(inboxAfterReadRec.Body.Bytes(), &inboxAfterReadPayload); err != nil {
-		t.Fatalf("decode inbox after read: %v", err)
-	}
-	if len(inboxAfterReadPayload.Messages) != 0 {
-		t.Fatalf("expected direct inbox to be empty after read receipt, got %#v", inboxAfterReadPayload.Messages)
-	}
-	aliceHistoryReq := httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages?userId=alice", nil)
-	aliceHistoryRouteCtx := chi.NewRouteContext()
-	aliceHistoryRouteCtx.URLParams.Add("roomID", roomID)
-	aliceHistoryReq = aliceHistoryReq.WithContext(context.WithValue(aliceHistoryReq.Context(), chi.RouteCtxKey, aliceHistoryRouteCtx))
-	aliceHistoryRec := httptest.NewRecorder()
-	app.messages(aliceHistoryRec, aliceHistoryReq)
-	if aliceHistoryRec.Code != http.StatusOK {
-		t.Fatalf("expected alice history ok, got %d: %s", aliceHistoryRec.Code, aliceHistoryRec.Body.String())
-	}
-	var aliceHistoryPayload struct {
-		Messages []message `json:"messages"`
-	}
-	if err := json.Unmarshal(aliceHistoryRec.Body.Bytes(), &aliceHistoryPayload); err != nil {
-		t.Fatalf("decode alice history: %v", err)
-	}
-	if len(aliceHistoryPayload.Messages) != 1 || aliceHistoryPayload.Messages[0].ReadAt == nil || aliceHistoryPayload.Messages[0].ReadAt.IsZero() {
-		t.Fatalf("expected sender history to include read receipt, got %#v", aliceHistoryPayload.Messages)
 	}
 
 	attachmentBody, _ := json.Marshal(createAttachmentRequest{SenderID: "alice", Data: base64.StdEncoding.EncodeToString([]byte("encrypted-document-bytes"))})

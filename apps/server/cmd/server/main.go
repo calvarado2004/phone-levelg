@@ -9,7 +9,6 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
-	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -106,13 +105,12 @@ type member struct {
 }
 
 type message struct {
-	ID        string     `json:"id"`
-	RoomID    string     `json:"roomId"`
-	SenderID  string     `json:"senderId"`
-	Sender    string     `json:"sender"`
-	Text      string     `json:"text"`
-	CreatedAt time.Time  `json:"createdAt"`
-	ReadAt    *time.Time `json:"readAt,omitempty"`
+	ID        string    `json:"id"`
+	RoomID    string    `json:"roomId"`
+	SenderID  string    `json:"senderId"`
+	Sender    string    `json:"sender"`
+	Text      string    `json:"text"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type attachment struct {
@@ -687,11 +685,6 @@ type createMessageRequest struct {
 	Text        string `json:"text"`
 }
 
-type readMessagesRequest struct {
-	UserID     string   `json:"userId"`
-	MessageIDs []string `json:"messageIds"`
-}
-
 type createAttachmentRequest struct {
 	SenderID string `json:"senderId"`
 	Data     string `json:"data"`
@@ -768,7 +761,6 @@ func main() {
 	router.Get("/direct/inbox", app.directInbox)
 	router.Get("/rooms/{roomID}/messages", app.messages)
 	router.Post("/rooms/{roomID}/messages", app.createMessage)
-	router.Post("/rooms/{roomID}/messages/read", app.readMessages)
 	router.Delete("/rooms/{roomID}/messages", app.deleteMessages)
 	router.Post("/rooms/{roomID}/attachments", app.createAttachment)
 	router.Get("/rooms/{roomID}/attachments/{attachmentID}", app.getAttachment)
@@ -855,18 +847,6 @@ create table if not exists messages (
   body text not null,
   created_at timestamptz not null default now()
 );
-
-create table if not exists message_receipts (
-  message_id text not null references messages(id) on delete cascade,
-  room_id text not null,
-  user_id text not null references users(id) on delete cascade,
-  delivered_at timestamptz,
-  read_at timestamptz,
-  created_at timestamptz not null default now(),
-  primary key (message_id, user_id)
-);
-create index if not exists message_receipts_user_unread_idx on message_receipts(user_id, created_at desc) where read_at is null;
-create index if not exists message_receipts_room_user_idx on message_receipts(room_id, user_id);
 
 create table if not exists attachments (
   id text primary key,
@@ -1220,13 +1200,11 @@ func (s *server) directInbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(r.Context(), `
-select distinct on (m.room_id) m.id, m.room_id, m.sender_id, m.sender_name, m.body, m.created_at
-from messages m
-join message_receipts mr on mr.message_id = m.id
-where mr.user_id = $1
-  and mr.read_at is null
-  and m.room_id like 'dm:%'
-order by m.room_id, m.created_at desc`, userID)
+select distinct on (room_id) id, room_id, sender_id, sender_name, body, created_at
+from messages
+where room_id like 'dm:%'
+  and (room_id like $1 or room_id like $2)
+order by room_id, created_at desc`, "dm:"+userID+":%", "dm:%:"+userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch inbox failed"})
 		return
@@ -1248,25 +1226,21 @@ order by m.room_id, m.created_at desc`, userID)
 
 func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 	roomID := roomIDParam(r)
-	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
 	if roomID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room required"})
 		return
 	}
-	if !canAccessRoom(roomID, userID) {
+	if !canAccessRoom(roomID, strings.TrimSpace(r.URL.Query().Get("userId"))) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
 		return
 	}
 
 	rows, err := s.db.Query(r.Context(), `
-select m.id, m.room_id, m.sender_id, m.sender_name, m.body, m.created_at, mr.read_at
-from messages m
-left join message_receipts mr on mr.message_id = m.id
-  and m.sender_id = $2
-  and mr.user_id <> $2
-where m.room_id = $1
-order by m.created_at desc
-limit 200`, roomID, userID)
+select id, room_id, sender_id, sender_name, body, created_at
+from messages
+where room_id = $1
+order by created_at desc
+limit 200`, roomID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch messages failed"})
 		return
@@ -1276,14 +1250,9 @@ limit 200`, roomID, userID)
 	history := make([]message, 0)
 	for rows.Next() {
 		var msg message
-		var readAt sql.NullTime
-		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt, &readAt); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan messages failed"})
 			return
-		}
-		if readAt.Valid {
-			readAtTime := readAt.Time
-			msg.ReadAt = &readAtTime
 		}
 		history = append(history, msg)
 	}
@@ -1319,73 +1288,6 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
-}
-
-func (s *server) readMessages(w http.ResponseWriter, r *http.Request) {
-	roomID := roomIDParam(r)
-	var req readMessagesRequest
-	if !readJSON(w, r, &req) {
-		return
-	}
-	req.UserID = strings.TrimSpace(req.UserID)
-	if roomID == "" || req.UserID == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room and user required"})
-		return
-	}
-	if len(directMessageRecipients(roomID)) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read receipts are only supported in direct chats"})
-		return
-	}
-	if !canAccessRoom(roomID, req.UserID) {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
-		return
-	}
-
-	messageIDs := sanitizeMessageIDs(req.MessageIDs)
-	readAt := time.Now().UTC()
-	rows, err := s.db.Query(r.Context(), `
-update message_receipts mr
-set delivered_at = coalesce(mr.delivered_at, $3),
-    read_at = coalesce(mr.read_at, $3)
-from messages m
-where mr.message_id = m.id
-  and mr.room_id = $1
-  and mr.user_id = $2
-  and m.sender_id <> $2
-  and mr.read_at is null
-  and (cardinality($4::text[]) = 0 or mr.message_id = any($4::text[]))
-returning mr.message_id`, roomID, req.UserID, readAt, messageIDs)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark messages read failed"})
-		return
-	}
-	defer rows.Close()
-
-	readMessageIDs := make([]string, 0)
-	for rows.Next() {
-		var messageID string
-		if err := rows.Scan(&messageID); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan read receipts failed"})
-			return
-		}
-		readMessageIDs = append(readMessageIDs, messageID)
-	}
-	if len(readMessageIDs) > 0 {
-		envelope := outboundEnvelope{
-			Type: "message:read",
-			Data: map[string]any{
-				"roomId":     roomID,
-				"readerId":   req.UserID,
-				"messageIds": readMessageIDs,
-				"readAt":     readAt,
-			},
-		}
-		for _, recipient := range directMessageRecipients(roomID) {
-			s.publish(r.Context(), "user:"+recipient, envelope)
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{"messageIds": readMessageIDs, "readAt": readAt})
 }
 
 func (s *server) createAttachment(w http.ResponseWriter, r *http.Request) {
@@ -1865,7 +1767,6 @@ func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, se
 	if text == "" || len(text) > maxMessageBodyBytes {
 		return message{}, false
 	}
-	recipients := directMessageRecipients(roomID)
 
 	msg := message{
 		ID:        randomID(),
@@ -1876,14 +1777,7 @@ func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, se
 		CreatedAt: time.Now().UTC(),
 	}
 
-	tx, err := s.db.Begin(ctx)
-	if err != nil {
-		slog.Error("begin store message", "error", err)
-		return message{}, false
-	}
-	defer tx.Rollback(ctx)
-
-	_, err = tx.Exec(ctx, `
+	_, err := s.db.Exec(ctx, `
 insert into messages (id, room_id, sender_id, sender_name, body, created_at)
 values ($1, $2, $3, $4, $5, $6)`,
 		msg.ID, msg.RoomID, msg.SenderID, msg.Sender, msg.Text, msg.CreatedAt)
@@ -1891,25 +1785,10 @@ values ($1, $2, $3, $4, $5, $6)`,
 		slog.Error("store message", "error", err)
 		return message{}, false
 	}
-	for _, recipient := range recipients {
-		if recipient == senderID {
-			continue
-		}
-		if _, err := tx.Exec(ctx, `
-insert into message_receipts (message_id, room_id, user_id)
-values ($1, $2, $3)
-on conflict (message_id, user_id) do nothing`, msg.ID, msg.RoomID, recipient); err != nil {
-			slog.Error("store message receipt", "error", err)
-			return message{}, false
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		slog.Error("commit message", "error", err)
-		return message{}, false
-	}
 
 	envelope := outboundEnvelope{Type: "message:new", Data: msg}
 	s.publish(ctx, channel, envelope)
+	recipients := directMessageRecipients(roomID)
 	for _, recipient := range recipients {
 		if recipient != senderID {
 			s.publish(ctx, "user:"+recipient, envelope)
@@ -1961,23 +1840,6 @@ func messagePushDevices(devices []pushDevice) []pushDevice {
 		}
 	}
 	return filtered
-}
-
-func sanitizeMessageIDs(values []string) []string {
-	if len(values) == 0 {
-		return []string{}
-	}
-	seen := make(map[string]bool, len(values))
-	cleaned := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || len(value) > 128 || seen[value] {
-			continue
-		}
-		seen[value] = true
-		cleaned = append(cleaned, value)
-	}
-	return cleaned
 }
 
 func apnsCallPayload(payload callPushPayload) map[string]any {

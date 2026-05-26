@@ -178,7 +178,6 @@ type Message = {
   text: string;
   attachment?: MessageAttachment;
   createdAt: string;
-  readAt?: string;
 };
 
 type MessageAttachment = {
@@ -247,7 +246,6 @@ type PermissionState = "unknown" | "granted" | "denied";
 type SocketEvent =
   | { type: "message:new"; data: Message }
   | { type: "message:clear"; data: { roomId: string; senderId: string } }
-  | { type: "message:read"; data: { roomId: string; readerId: string; messageIds: string[]; readAt: string } }
   | { type: "call:ring"; data: { callId?: string; roomId: string; senderId: string; sender: string; mode?: "voice" | "video"; expiresAt?: string } }
   | { type: "call:end"; data: { callId?: string; roomId: string; senderId: string; sender: string; reason?: string } }
   | { type: "call:reject"; data: { callId?: string; roomId: string; senderId: string; sender: string; reason?: string } }
@@ -999,31 +997,8 @@ export default function App() {
       const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(roomID)}/messages?userId=${encodeURIComponent(userID)}`);
       const nextMessages = await decryptMessages((payload.messages ?? []) as Message[], session?.messageKeySecret);
       setMessages(current => messagesEqual(current, nextMessages) ? current : nextMessages);
-      if (isDirectRoomID(roomID)) {
-        void markRoomMessagesRead(roomID, nextMessages.filter(message => message.senderId !== userID).map(message => message.id));
-      }
     } catch {
       // Keep the existing view if a transient refresh fails.
-    }
-  }
-
-  async function markRoomMessagesRead(roomID = activeRoomID, messageIDs: string[] = []) {
-    if (!session || E2E_MODE || !isDirectRoomID(roomID)) return;
-    try {
-      const payload = await fetchJSON(`${apiURL}/rooms/${encodeURIComponent(roomID)}/messages/read`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: session.userId,
-          messageIds: messageIDs
-        })
-      });
-      const readMessageIDs = (payload.messageIds ?? []) as string[];
-      if (readMessageIDs.length > 0) {
-        setUnreadRoomIDs(current => current.filter(currentRoomID => currentRoomID !== roomID));
-      }
-    } catch {
-      // Read receipts are retried by the next active-room refresh.
     }
   }
 
@@ -1095,9 +1070,6 @@ export default function App() {
         void decryptMessage(payload.data, session.messageKeySecret).then(nextMessage => {
           if (nextMessage.roomId === activeRoomID) {
             setMessages(current => mergeMessages(current, nextMessage));
-            if (nextMessage.senderId !== session.userId) {
-              void markRoomMessagesRead(nextMessage.roomId, [nextMessage.id]);
-            }
           } else if (nextMessage.senderId !== session.userId) {
             setUnreadRoomIDs(current => current.includes(nextMessage.roomId) ? current : [...current, nextMessage.roomId]);
             if (isDirectRoomID(nextMessage.roomId)) {
@@ -1113,10 +1085,6 @@ export default function App() {
           setMessages([]);
           setSelectedMember(null);
         }
-      }
-      if (payload.type === "message:read") {
-        setMessages(current => applyReadReceipt(current, payload.data));
-        setUnreadRoomIDs(current => payload.data.readerId === session.userId ? current.filter(roomID => roomID !== payload.data.roomId) : current);
       }
       if (payload.type === "call:ring" && payload.data.senderId !== session.userId) {
         void showIncomingCallFromPayload(payload.data, "websocket");
@@ -2265,9 +2233,6 @@ export default function App() {
                 <Text style={styles.timestamp}>
                   {new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                 </Text>
-                {mine && item.readAt && (
-                  <Text style={styles.readReceipt}>Read</Text>
-                )}
               </View>
             );
           }}
@@ -2493,26 +2458,10 @@ function upsertMember(current: Member[], next: Member) {
 }
 
 function mergeMessages(current: Message[], next: Message) {
-  const existing = current.find(message => message.id === next.id);
-  if (existing) {
-    if (existing.readAt === next.readAt) return current;
-    return current.map(message => message.id === next.id ? { ...message, readAt: next.readAt ?? message.readAt } : message);
+  if (current.some(message => message.id === next.id)) {
+    return current;
   }
   return [...current, next];
-}
-
-function applyReadReceipt(current: Message[], receipt: { readerId: string; messageIds: string[]; readAt: string }) {
-  if (receipt.messageIds.length === 0) return current;
-  const readIDs = new Set(receipt.messageIds);
-  let changed = false;
-  const nextMessages = current.map(message => {
-    if (!readIDs.has(message.id) || message.senderId === receipt.readerId || message.readAt === receipt.readAt) {
-      return message;
-    }
-    changed = true;
-    return { ...message, readAt: receipt.readAt };
-  });
-  return changed ? nextMessages : current;
 }
 
 async function encryptMessageText(roomID: string, text: string, messageKeySecret: string) {
@@ -2673,8 +2622,7 @@ function messagesEqual(left: Message[], right: Message[]) {
       message.senderId === other.senderId &&
       message.sender === other.sender &&
       message.text === other.text &&
-      message.createdAt === other.createdAt &&
-      message.readAt === other.readAt;
+      message.createdAt === other.createdAt;
   });
 }
 
@@ -3879,13 +3827,6 @@ const styles = StyleSheet.create({
     color: "#77808b",
     fontSize: 11,
     marginTop: 4,
-    marginHorizontal: 4
-  },
-  readReceipt: {
-    color: "#6d28d9",
-    fontSize: 11,
-    fontWeight: "800",
-    marginTop: 2,
     marginHorizontal: 4
   },
   emojiRow: {
