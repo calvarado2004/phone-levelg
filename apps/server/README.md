@@ -51,6 +51,14 @@ Returns the latest 200 messages for a room in chronological order. New mobile cl
 
 For 1-1 rooms (`dm:{userA}:{userB}`), callers must include `?userId=...`; only the two room members can read the history.
 
+### `POST /rooms/{roomID}/messages/delivered`
+
+Marks direct messages as delivered for the recipient account and consumes pending APNs/FCM message delivery attempts.
+
+### `POST /rooms/{roomID}/messages/read`
+
+Marks direct messages as read for the recipient account and broadcasts `message:read` to the direct-room participants. Read receipts are UI state; delivered receipts are what stop pending push delivery work.
+
 ### `POST /rooms/{roomID}/attachments`
 
 Stores an opaque encrypted attachment blob for a direct chat. The request body is:

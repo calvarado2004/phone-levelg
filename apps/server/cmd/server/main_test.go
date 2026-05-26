@@ -125,6 +125,14 @@ func TestDirectRoomAccessRequiresParticipant(t *testing.T) {
 	}
 }
 
+func TestSanitizeMessageIDsDropsInvalidAndDuplicateValues(t *testing.T) {
+	longID := strings.Repeat("x", 129)
+	got := sanitizeMessageIDs([]string{" m1 ", "", "m1", longID, "m2"})
+	if len(got) != 2 || got[0] != "m1" || got[1] != "m2" {
+		t.Fatalf("unexpected sanitized IDs: %#v", got)
+	}
+}
+
 func TestNormalizeAvatarURLAllowsOnlyHTTPS(t *testing.T) {
 	if got := normalizeAvatarURL(" https://example.com/avatar.png "); got != "https://example.com/avatar.png" {
 		t.Fatalf("expected https avatar URL, got %q", got)
@@ -933,7 +941,7 @@ func TestIntegrationDirectMessageReachesRecipientUserChannelOnly(t *testing.T) {
 	defer alice.Close()
 
 	drainJoinedEvents(t, bob, 2)
-	drainJoinedEvents(t, charlie, 1)
+	drainJoinedEvents(t, charlie, 2)
 
 	if err := alice.WriteJSON(wsEnvelope{
 		Type: "message:send",
@@ -1063,6 +1071,80 @@ values ($1, $2, $3, $4, $5)`, item.DeviceID, item.UserID, item.Platform, item.Pu
 	}
 	if len(inboxPayload.Messages) != 1 || inboxPayload.Messages[0].SenderID != "alice" || inboxPayload.Messages[0].Text != encryptedEnvelope {
 		t.Fatalf("unexpected inbox payload: %#v", inboxPayload.Messages)
+	}
+	messageID := inboxPayload.Messages[0].ID
+
+	var sentAttemptCount int
+	if err := db.QueryRow(ctx, `select count(*) from message_delivery_attempts where message_id = $1 and recipient_user_id = 'bob' and status = 'sent'`, messageID).Scan(&sentAttemptCount); err != nil {
+		t.Fatalf("count sent delivery attempts: %v", err)
+	}
+	if sentAttemptCount != 2 {
+		t.Fatalf("expected two sent message delivery attempts, got %d", sentAttemptCount)
+	}
+
+	deliveredBody, _ := json.Marshal(messageReceiptRequest{UserID: "bob", MessageIDs: []string{messageID}})
+	deliveredReq := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages/delivered", bytes.NewReader(deliveredBody))
+	deliveredRouteCtx := chi.NewRouteContext()
+	deliveredRouteCtx.URLParams.Add("roomID", roomID)
+	deliveredReq = deliveredReq.WithContext(context.WithValue(deliveredReq.Context(), chi.RouteCtxKey, deliveredRouteCtx))
+	deliveredRec := httptest.NewRecorder()
+	app.deliverMessages(deliveredRec, deliveredReq)
+	if deliveredRec.Code != http.StatusOK {
+		t.Fatalf("expected delivered ok, got %d: %s", deliveredRec.Code, deliveredRec.Body.String())
+	}
+
+	var deliveredAttemptCount int
+	if err := db.QueryRow(ctx, `select count(*) from message_delivery_attempts where message_id = $1 and recipient_user_id = 'bob' and status = 'delivered'`, messageID).Scan(&deliveredAttemptCount); err != nil {
+		t.Fatalf("count delivered attempts: %v", err)
+	}
+	if deliveredAttemptCount != 2 {
+		t.Fatalf("expected delivered ack to consume two message delivery attempts, got %d", deliveredAttemptCount)
+	}
+
+	readBody, _ := json.Marshal(messageReceiptRequest{UserID: "bob", MessageIDs: []string{messageID}})
+	readReq := httptest.NewRequest(http.MethodPost, "/rooms/"+roomID+"/messages/read", bytes.NewReader(readBody))
+	readRouteCtx := chi.NewRouteContext()
+	readRouteCtx.URLParams.Add("roomID", roomID)
+	readReq = readReq.WithContext(context.WithValue(readReq.Context(), chi.RouteCtxKey, readRouteCtx))
+	readRec := httptest.NewRecorder()
+	app.readMessages(readRec, readReq)
+	if readRec.Code != http.StatusOK {
+		t.Fatalf("expected read ok, got %d: %s", readRec.Code, readRec.Body.String())
+	}
+
+	aliceHistoryReq := httptest.NewRequest(http.MethodGet, "/rooms/"+roomID+"/messages?userId=alice", nil)
+	aliceHistoryRouteCtx := chi.NewRouteContext()
+	aliceHistoryRouteCtx.URLParams.Add("roomID", roomID)
+	aliceHistoryReq = aliceHistoryReq.WithContext(context.WithValue(aliceHistoryReq.Context(), chi.RouteCtxKey, aliceHistoryRouteCtx))
+	aliceHistoryRec := httptest.NewRecorder()
+	app.messages(aliceHistoryRec, aliceHistoryReq)
+	if aliceHistoryRec.Code != http.StatusOK {
+		t.Fatalf("expected alice history ok, got %d: %s", aliceHistoryRec.Code, aliceHistoryRec.Body.String())
+	}
+	var aliceHistoryPayload struct {
+		Messages []message `json:"messages"`
+	}
+	if err := json.Unmarshal(aliceHistoryRec.Body.Bytes(), &aliceHistoryPayload); err != nil {
+		t.Fatalf("decode alice history: %v", err)
+	}
+	if len(aliceHistoryPayload.Messages) != 1 || aliceHistoryPayload.Messages[0].ReadAt == nil {
+		t.Fatalf("expected alice to see read receipt on sent message, got %#v", aliceHistoryPayload.Messages)
+	}
+
+	inboxAfterReadReq := httptest.NewRequest(http.MethodGet, "/direct/inbox?userId=bob", nil)
+	inboxAfterReadRec := httptest.NewRecorder()
+	app.directInbox(inboxAfterReadRec, inboxAfterReadReq)
+	if inboxAfterReadRec.Code != http.StatusOK {
+		t.Fatalf("expected inbox after read ok, got %d: %s", inboxAfterReadRec.Code, inboxAfterReadRec.Body.String())
+	}
+	var inboxAfterReadPayload struct {
+		Messages []message `json:"messages"`
+	}
+	if err := json.Unmarshal(inboxAfterReadRec.Body.Bytes(), &inboxAfterReadPayload); err != nil {
+		t.Fatalf("decode inbox after read: %v", err)
+	}
+	if len(inboxAfterReadPayload.Messages) != 0 {
+		t.Fatalf("expected direct inbox to be empty after read, got %#v", inboxAfterReadPayload.Messages)
 	}
 
 	attachmentBody, _ := json.Marshal(createAttachmentRequest{SenderID: "alice", Data: base64.StdEncoding.EncodeToString([]byte("encrypted-document-bytes"))})

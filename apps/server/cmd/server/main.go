@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -105,12 +106,13 @@ type member struct {
 }
 
 type message struct {
-	ID        string    `json:"id"`
-	RoomID    string    `json:"roomId"`
-	SenderID  string    `json:"senderId"`
-	Sender    string    `json:"sender"`
-	Text      string    `json:"text"`
-	CreatedAt time.Time `json:"createdAt"`
+	ID        string     `json:"id"`
+	RoomID    string     `json:"roomId"`
+	SenderID  string     `json:"senderId"`
+	Sender    string     `json:"sender"`
+	Text      string     `json:"text"`
+	CreatedAt time.Time  `json:"createdAt"`
+	ReadAt    *time.Time `json:"readAt,omitempty"`
 }
 
 type attachment struct {
@@ -685,6 +687,12 @@ type createMessageRequest struct {
 	Text        string `json:"text"`
 }
 
+type messageReceiptRequest struct {
+	UserID            string   `json:"userId"`
+	MessageIDs        []string `json:"messageIds"`
+	LastReadMessageID string   `json:"lastReadMessageId"`
+}
+
 type createAttachmentRequest struct {
 	SenderID string `json:"senderId"`
 	Data     string `json:"data"`
@@ -761,6 +769,8 @@ func main() {
 	router.Get("/direct/inbox", app.directInbox)
 	router.Get("/rooms/{roomID}/messages", app.messages)
 	router.Post("/rooms/{roomID}/messages", app.createMessage)
+	router.Post("/rooms/{roomID}/messages/delivered", app.deliverMessages)
+	router.Post("/rooms/{roomID}/messages/read", app.readMessages)
 	router.Delete("/rooms/{roomID}/messages", app.deleteMessages)
 	router.Post("/rooms/{roomID}/attachments", app.createAttachment)
 	router.Get("/rooms/{roomID}/attachments/{attachmentID}", app.getAttachment)
@@ -848,6 +858,18 @@ create table if not exists messages (
   created_at timestamptz not null default now()
 );
 
+create table if not exists message_receipts (
+  message_id text not null references messages(id) on delete cascade,
+  room_id text not null,
+  user_id text not null references users(id) on delete cascade,
+  delivered_at timestamptz,
+  read_at timestamptz,
+  created_at timestamptz not null default now(),
+  primary key (message_id, user_id)
+);
+create index if not exists message_receipts_user_unread_idx on message_receipts(user_id, created_at desc) where read_at is null;
+create index if not exists message_receipts_room_user_idx on message_receipts(room_id, user_id);
+
 create table if not exists attachments (
   id text primary key,
   room_id text not null,
@@ -871,6 +893,21 @@ create table if not exists devices (
 );
 create index if not exists devices_user_id_idx on devices(user_id);
 create unique index if not exists devices_platform_push_token_idx on devices(platform, push_token);
+
+create table if not exists message_delivery_attempts (
+  message_id text not null references messages(id) on delete cascade,
+  device_id text not null references devices(device_id) on delete cascade,
+  recipient_user_id text not null references users(id) on delete cascade,
+  platform text not null,
+  push_token_type text not null,
+  status text not null default 'pending',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (message_id, device_id),
+  constraint message_delivery_attempts_status_check check (status in ('pending', 'sent', 'delivered', 'failed', 'expired'))
+);
+create index if not exists message_delivery_attempts_pending_idx on message_delivery_attempts(message_id, status);
+create index if not exists message_delivery_attempts_recipient_idx on message_delivery_attempts(recipient_user_id, created_at desc);
 
 create table if not exists call_attempts (
   call_id text primary key,
@@ -1200,11 +1237,13 @@ func (s *server) directInbox(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.db.Query(r.Context(), `
-select distinct on (room_id) id, room_id, sender_id, sender_name, body, created_at
-from messages
-where room_id like 'dm:%'
-  and (room_id like $1 or room_id like $2)
-order by room_id, created_at desc`, "dm:"+userID+":%", "dm:%:"+userID)
+select distinct on (m.room_id) m.id, m.room_id, m.sender_id, m.sender_name, m.body, m.created_at
+from messages m
+join message_receipts mr on mr.message_id = m.id
+where mr.user_id = $1
+  and mr.read_at is null
+  and m.room_id like 'dm:%'
+order by m.room_id, m.created_at desc`, userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch inbox failed"})
 		return
@@ -1226,21 +1265,25 @@ order by room_id, created_at desc`, "dm:"+userID+":%", "dm:%:"+userID)
 
 func (s *server) messages(w http.ResponseWriter, r *http.Request) {
 	roomID := roomIDParam(r)
+	userID := strings.TrimSpace(r.URL.Query().Get("userId"))
 	if roomID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room required"})
 		return
 	}
-	if !canAccessRoom(roomID, strings.TrimSpace(r.URL.Query().Get("userId"))) {
+	if !canAccessRoom(roomID, userID) {
 		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
 		return
 	}
 
 	rows, err := s.db.Query(r.Context(), `
-select id, room_id, sender_id, sender_name, body, created_at
-from messages
-where room_id = $1
-order by created_at desc
-limit 200`, roomID)
+select m.id, m.room_id, m.sender_id, m.sender_name, m.body, m.created_at, mr.read_at
+from messages m
+left join message_receipts mr on mr.message_id = m.id
+  and m.sender_id = $2
+  and mr.user_id <> $2
+where m.room_id = $1
+order by m.created_at desc
+limit 200`, roomID, userID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fetch messages failed"})
 		return
@@ -1250,9 +1293,14 @@ limit 200`, roomID)
 	history := make([]message, 0)
 	for rows.Next() {
 		var msg message
-		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt); err != nil {
+		var readAt sql.NullTime
+		if err := rows.Scan(&msg.ID, &msg.RoomID, &msg.SenderID, &msg.Sender, &msg.Text, &msg.CreatedAt, &readAt); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "scan messages failed"})
 			return
+		}
+		if readAt.Valid {
+			readAtTime := readAt.Time
+			msg.ReadAt = &readAtTime
 		}
 		history = append(history, msg)
 	}
@@ -1288,6 +1336,81 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"message": msg})
+}
+
+func (s *server) deliverMessages(w http.ResponseWriter, r *http.Request) {
+	roomID := roomIDParam(r)
+	var req messageReceiptRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	if roomID == "" || req.UserID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room and user required"})
+		return
+	}
+	if len(directMessageRecipients(roomID)) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "delivery receipts are only supported in direct chats"})
+		return
+	}
+	if !canAccessRoom(roomID, req.UserID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	deliveredAt := time.Now().UTC()
+	deliveredIDs, err := s.markMessagesDelivered(r.Context(), roomID, req.UserID, sanitizeMessageIDs(req.MessageIDs), deliveredAt)
+	if err != nil {
+		slog.Error("mark messages delivered", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark messages delivered failed"})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"messageIds": deliveredIDs, "deliveredAt": deliveredAt})
+}
+
+func (s *server) readMessages(w http.ResponseWriter, r *http.Request) {
+	roomID := roomIDParam(r)
+	var req messageReceiptRequest
+	if !readJSON(w, r, &req) {
+		return
+	}
+	req.UserID = strings.TrimSpace(req.UserID)
+	if roomID == "" || req.UserID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "room and user required"})
+		return
+	}
+	if len(directMessageRecipients(roomID)) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "read receipts are only supported in direct chats"})
+		return
+	}
+	if !canAccessRoom(roomID, req.UserID) {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "room access denied"})
+		return
+	}
+
+	readAt := time.Now().UTC()
+	readIDs, err := s.markMessagesRead(r.Context(), roomID, req.UserID, sanitizeMessageIDs(req.MessageIDs), strings.TrimSpace(req.LastReadMessageID), readAt)
+	if err != nil {
+		slog.Error("mark messages read", "error", err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "mark messages read failed"})
+		return
+	}
+	if len(readIDs) > 0 {
+		envelope := outboundEnvelope{
+			Type: "message:read",
+			Data: map[string]any{
+				"roomId":     roomID,
+				"readerId":   req.UserID,
+				"messageIds": readIDs,
+				"readAt":     readAt,
+			},
+		}
+		for _, recipient := range directMessageRecipients(roomID) {
+			s.publish(r.Context(), "user:"+recipient, envelope)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"messageIds": readIDs, "readAt": readAt})
 }
 
 func (s *server) createAttachment(w http.ResponseWriter, r *http.Request) {
@@ -1767,6 +1890,7 @@ func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, se
 	if text == "" || len(text) > maxMessageBodyBytes {
 		return message{}, false
 	}
+	recipients := directMessageRecipients(roomID)
 
 	msg := message{
 		ID:        randomID(),
@@ -1777,7 +1901,14 @@ func (s *server) storeAndPublishMessage(ctx context.Context, channel, roomID, se
 		CreatedAt: time.Now().UTC(),
 	}
 
-	_, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		slog.Error("begin store message", "error", err)
+		return message{}, false
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
 insert into messages (id, room_id, sender_id, sender_name, body, created_at)
 values ($1, $2, $3, $4, $5, $6)`,
 		msg.ID, msg.RoomID, msg.SenderID, msg.Sender, msg.Text, msg.CreatedAt)
@@ -1785,10 +1916,26 @@ values ($1, $2, $3, $4, $5, $6)`,
 		slog.Error("store message", "error", err)
 		return message{}, false
 	}
+	for _, recipient := range recipients {
+		if recipient == senderID {
+			continue
+		}
+		_, err := tx.Exec(ctx, `
+insert into message_receipts (message_id, room_id, user_id)
+values ($1, $2, $3)
+on conflict (message_id, user_id) do nothing`, msg.ID, msg.RoomID, recipient)
+		if err != nil {
+			slog.Error("store message receipt", "error", err)
+			return message{}, false
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		slog.Error("commit message", "error", err)
+		return message{}, false
+	}
 
 	envelope := outboundEnvelope{Type: "message:new", Data: msg}
 	s.publish(ctx, channel, envelope)
-	recipients := directMessageRecipients(roomID)
 	for _, recipient := range recipients {
 		if recipient != senderID {
 			s.publish(ctx, "user:"+recipient, envelope)
@@ -1817,6 +1964,10 @@ func (s *server) dispatchNativeMessagePush(ctx context.Context, msg message, rec
 	if len(devices) == 0 {
 		return
 	}
+	if err := s.storeMessageDeliveryAttempts(ctx, msg.ID, devices); err != nil {
+		slog.Error("store message delivery attempts", "error", err)
+		return
+	}
 	payload := messagePushPayload{
 		MessageID: msg.ID,
 		RoomID:    msg.RoomID,
@@ -1825,9 +1976,16 @@ func (s *server) dispatchNativeMessagePush(ctx context.Context, msg message, rec
 		Preview:   "New private message",
 	}
 	s.enqueuePush(ctx, "message", func(ctx context.Context) {
-		if err := dispatcher.DispatchMessagePush(ctx, payload, devices); err != nil {
-			slog.Error("dispatch message push", "error", err)
+		pendingDevices := s.pendingMessagePushDevices(ctx, payload.MessageID)
+		if len(pendingDevices) == 0 {
+			return
 		}
+		if err := dispatcher.DispatchMessagePush(ctx, payload, pendingDevices); err != nil {
+			slog.Error("dispatch message push", "error", err)
+			s.markMessageDeliveryAttempts(ctx, payload.MessageID, pendingDevices, "failed")
+			return
+		}
+		s.markMessageDeliveryAttempts(ctx, payload.MessageID, pendingDevices, "sent")
 	})
 }
 
@@ -1840,6 +1998,206 @@ func messagePushDevices(devices []pushDevice) []pushDevice {
 		}
 	}
 	return filtered
+}
+
+func (s *server) storeMessageDeliveryAttempts(ctx context.Context, messageID string, devices []pushDevice) error {
+	if len(devices) == 0 {
+		return nil
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	for _, device := range devices {
+		_, err := tx.Exec(ctx, `
+insert into message_delivery_attempts (message_id, device_id, recipient_user_id, platform, push_token_type)
+values ($1, $2, $3, $4, $5)
+on conflict (message_id, device_id) do nothing`,
+			messageID, device.DeviceID, device.UserID, device.Platform, device.PushTokenType)
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
+}
+
+func (s *server) pendingMessagePushDevices(ctx context.Context, messageID string) []pushDevice {
+	rows, err := s.db.Query(ctx, `
+select d.device_id, d.user_id, d.platform, d.push_token, d.push_token_type
+from message_delivery_attempts mda
+join devices d on d.device_id = mda.device_id
+where mda.message_id = $1
+  and mda.status = 'pending'
+order by d.user_id, d.device_id`, messageID)
+	if err != nil {
+		slog.Error("load pending message push devices", "error", err)
+		return nil
+	}
+	defer rows.Close()
+
+	devices := make([]pushDevice, 0)
+	for rows.Next() {
+		var device pushDevice
+		if err := rows.Scan(&device.DeviceID, &device.UserID, &device.Platform, &device.PushToken, &device.PushTokenType); err == nil {
+			devices = append(devices, device)
+		}
+	}
+	return devices
+}
+
+func (s *server) markMessageDeliveryAttempts(ctx context.Context, messageID string, devices []pushDevice, status string) {
+	if len(devices) == 0 {
+		return
+	}
+	deviceIDs := make([]string, 0, len(devices))
+	for _, device := range devices {
+		deviceIDs = append(deviceIDs, device.DeviceID)
+	}
+	_, err := s.db.Exec(ctx, `
+update message_delivery_attempts
+set status = $3,
+    updated_at = now()
+where message_id = $1
+  and device_id = any($2)
+  and status = 'pending'`, messageID, deviceIDs, status)
+	if err != nil {
+		slog.Error("mark message delivery attempts", "status", status, "error", err)
+	}
+}
+
+func (s *server) markMessagesDelivered(ctx context.Context, roomID, userID string, messageIDs []string, deliveredAt time.Time) ([]string, error) {
+	rows, err := s.db.Query(ctx, `
+update message_receipts mr
+set delivered_at = coalesce(mr.delivered_at, $3)
+from messages m
+where mr.message_id = m.id
+  and mr.room_id = $1
+  and mr.user_id = $2
+  and m.sender_id <> $2
+  and (cardinality($4::text[]) = 0 or mr.message_id = any($4::text[]))
+returning mr.message_id`, roomID, userID, deliveredAt, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	deliveredIDs := make([]string, 0)
+	for rows.Next() {
+		var messageID string
+		if err := rows.Scan(&messageID); err != nil {
+			return nil, err
+		}
+		deliveredIDs = append(deliveredIDs, messageID)
+	}
+	if len(deliveredIDs) > 0 {
+		_, err = s.db.Exec(ctx, `
+update message_delivery_attempts
+set status = 'delivered',
+    updated_at = now()
+where recipient_user_id = $1
+  and message_id = any($2)
+  and status in ('pending', 'sent')`, userID, deliveredIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return deliveredIDs, nil
+}
+
+func (s *server) markMessagesRead(ctx context.Context, roomID, userID string, messageIDs []string, lastReadMessageID string, readAt time.Time) ([]string, error) {
+	if len(messageIDs) == 0 && lastReadMessageID != "" {
+		ids, err := s.messageIDsThrough(ctx, roomID, userID, lastReadMessageID)
+		if err != nil {
+			return nil, err
+		}
+		messageIDs = ids
+	}
+	rows, err := s.db.Query(ctx, `
+update message_receipts mr
+set delivered_at = coalesce(mr.delivered_at, $3),
+    read_at = coalesce(mr.read_at, $3)
+from messages m
+where mr.message_id = m.id
+  and mr.room_id = $1
+  and mr.user_id = $2
+  and m.sender_id <> $2
+  and mr.read_at is null
+  and (cardinality($4::text[]) = 0 or mr.message_id = any($4::text[]))
+returning mr.message_id`, roomID, userID, readAt, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	readIDs := make([]string, 0)
+	for rows.Next() {
+		var messageID string
+		if err := rows.Scan(&messageID); err != nil {
+			return nil, err
+		}
+		readIDs = append(readIDs, messageID)
+	}
+	if len(readIDs) > 0 {
+		_, err = s.db.Exec(ctx, `
+update message_delivery_attempts
+set status = 'delivered',
+    updated_at = now()
+where recipient_user_id = $1
+  and message_id = any($2)
+  and status in ('pending', 'sent')`, userID, readIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return readIDs, nil
+}
+
+func (s *server) messageIDsThrough(ctx context.Context, roomID, userID, lastReadMessageID string) ([]string, error) {
+	var lastCreatedAt time.Time
+	if err := s.db.QueryRow(ctx, `
+select created_at
+from messages
+where id = $1 and room_id = $2`, lastReadMessageID, roomID).Scan(&lastCreatedAt); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.Query(ctx, `
+select id
+from messages
+where room_id = $1
+  and sender_id <> $2
+  and created_at <= $3
+order by created_at`, roomID, userID, lastCreatedAt)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := make([]string, 0)
+	for rows.Next() {
+		var messageID string
+		if err := rows.Scan(&messageID); err != nil {
+			return nil, err
+		}
+		ids = append(ids, messageID)
+	}
+	return ids, nil
+}
+
+func sanitizeMessageIDs(values []string) []string {
+	if len(values) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]bool, len(values))
+	cleaned := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" || len(value) > 128 || seen[value] {
+			continue
+		}
+		seen[value] = true
+		cleaned = append(cleaned, value)
+	}
+	return cleaned
 }
 
 func apnsCallPayload(payload callPushPayload) map[string]any {

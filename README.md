@@ -597,6 +597,14 @@ Returns the latest room messages in chronological order. New mobile clients stor
 
 For direct rooms, pass `?userId=...`; non-participants receive `403`.
 
+### `POST /rooms/{roomID}/messages/delivered`
+
+Marks received direct messages as delivered for the recipient account and consumes pending native message delivery attempts so async push work does not keep retrying after WebSocket delivery.
+
+### `POST /rooms/{roomID}/messages/read`
+
+Marks received direct messages as read for the recipient account and publishes `message:read` to the two direct-room participants. Sender clients use this only for the visible read marker; delivery queue consumption is handled separately by `delivered`.
+
 ### `POST /rooms/{roomID}/attachments`
 
 Stores an encrypted attachment blob for a direct room. The backend accepts only opaque base64 ciphertext and rejects lobby-room attachments.

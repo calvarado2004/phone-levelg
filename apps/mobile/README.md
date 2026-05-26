@@ -60,6 +60,8 @@ Direct chats can be deleted from the selected private conversation. Deletion cle
 
 New message bodies are encrypted before they are sent to the backend. The server stores and relays opaque `plgenc:v1` envelopes, and this app decrypts history and live websocket messages locally. Existing plaintext rows remain readable during rollout.
 
+Direct message delivery and read state are separate. The app acknowledges delivered direct messages when it receives them over WebSocket or direct inbox refresh so the server can consume pending APNs/FCM message delivery work. It sends read receipts only when the direct chat is visible, and the sender sees a single `Read` marker on the latest read sent message.
+
 Photo and document attachments are available only inside 1-1 chats. File bytes are loaded from picker-provided base64 data when available, with app-cache/content URI fallbacks, then encrypted locally before upload. Filename/type metadata is carried inside the encrypted `plgattach:v1` chat message so the backend only stores opaque blobs.
 
 iOS must declare `NSPhotoLibraryUsageDescription` for picture selection. Android must declare `READ_MEDIA_IMAGES` on modern devices and `READ_EXTERNAL_STORAGE` with `maxSdkVersion=32` for older devices.
