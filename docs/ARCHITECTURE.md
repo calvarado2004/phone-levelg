@@ -54,6 +54,7 @@ The backend lives in `apps/server` and is intentionally small:
 - allows duplicate display names across different email accounts
 - stores opaque encrypted message envelopes and encrypted attachment blobs
 - enforces direct-room access for 1-1 messages, attachments, and deletion
+- tracks pending/read receipts for direct messages and publishes `message:read` events
 - keeps a device registry for iOS APNs alert tokens, iOS PushKit VoIP tokens, and Android FCM tokens
 - sends native message and call pushes through an async push queue
 - caches APNs provider JWTs to avoid Apple `TooManyProviderTokenUpdates`
@@ -98,6 +99,7 @@ Regular messages:
 - inactive iPhones receive regular APNs alert pushes
 - inactive Android devices receive FCM pushes
 - iOS VoIP pushes are not used for chat messages
+- opened direct chats mark received messages read, consume pending inbox state, and notify the sender through `message:read`
 
 Calls:
 

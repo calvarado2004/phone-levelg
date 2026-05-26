@@ -134,6 +134,11 @@ assert.match(appTsx, /directRoomID/, "Mobile app must support deterministic 1-1 
 assert.match(appTsx, /`dm:\$\{\[firstID, secondID\]\.sort\(\)\.join\(":\"\)\}`/, "1-1 rooms must use explicit private room IDs");
 assert.match(appTsx, /rooms\/\$\{encodeURIComponent\(roomID\)\}\/messages\?userId=\$\{encodeURIComponent\(userID\)\}/, "Private message history requests must include the current user id");
 assert.match(appTsx, /direct\/inbox\?userId=\$\{encodeURIComponent\(session\.userId\)\}/, "Mobile app must poll direct inbox so first private messages are not lost");
+assert.match(appTsx, /rooms\/\$\{encodeURIComponent\(roomID\)\}\/messages\/read/, "Mobile app must mark direct messages read through the backend");
+assert.match(appTsx, /messageIds: messageIDs/, "Read receipts must include the message ids being consumed");
+assert.match(appTsx, /payload\.type === "message:read"/, "Mobile app must handle server read-receipt events");
+assert.match(appTsx, /applyReadReceipt\(current, payload\.data\)/, "Read-receipt events must update rendered message state");
+assert.match(appTsx, /mine && item\.readAt[\s\S]*styles\.readReceipt[\s\S]*Read/, "Sender bubbles must show when the other direct-chat participant has read a message");
 assert.match(appTsx, /STORED_PRIVATE_MESSAGE_SOUND_KEY = "phone-levelg\.privateMessageSound\.v1"/, "Private message notification sound preference must persist locally");
 assert.match(appTsx, /PRIVATE_MESSAGE_CHANNEL_ID = "private-messages"/, "Private message notifications must use a dedicated channel");
 assert.match(appTsx, /PRIVATE_MESSAGE_SOUND = Platform\.OS === "android" \? "message_notification\.mp3" : "message-notification\.mp3"/, "Private message notifications must use the bundled message ringtone on each platform");

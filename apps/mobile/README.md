@@ -10,6 +10,7 @@ React Native / Expo client for iOS and Android.
 - Hidden 1-1 chats opened from a lobby member.
 - Direct chat deletion.
 - Real-time messages over WebSocket.
+- Read receipts in 1-1 chats.
 - Client-side encrypted message bodies for new messages.
 - Encrypted photo and document attachments in 1-1 chats.
 - Inline decrypted image previews for photo attachments.
@@ -57,6 +58,8 @@ Display names are presentation-only. The backend allows two accounts to use the 
 The lobby shows members, not private chat rooms. Tapping a member opens a deterministic 1-1 room computed from both user IDs. Other members do not see that room and cannot fetch its message history.
 
 Direct chats can be deleted from the selected private conversation. Deletion clears the room history and broadcasts a clear event only to the two participants.
+
+When a direct chat is opened or refreshed, the app marks received messages read through the backend. That consumes the server-side pending receipt state used by the direct inbox and publishes a `message:read` event so the sender's Android or iOS client can show the read mark. Lobby messages do not use read receipts.
 
 New message bodies are encrypted before they are sent to the backend. The server stores and relays opaque `plgenc:v1` envelopes, and this app decrypts history and live websocket messages locally. Existing plaintext rows remain readable during rollout.
 

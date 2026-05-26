@@ -215,6 +215,7 @@ It provides:
 - joined-member lobby backed by Postgres
 - shared `Home` lobby room
 - private 1-1 chats between members
+- read receipts for private 1-1 chats
 - client-side encrypted message bodies for new chat messages
 - encrypted picture and document sharing in 1-1 chats
 - optional private-message notification sound for 1-1 chats only, using `ringtones/message-notification.mp3`
@@ -235,6 +236,8 @@ It provides:
 Encrypted picture attachments require native photo-library permissions. iOS declares `NSPhotoLibraryUsageDescription`; Android declares `READ_MEDIA_IMAGES` for modern devices and keeps `READ_EXTERNAL_STORAGE` for Android 12 and older. Photo and document pickers request platform-provided base64 bytes first, then fall back to readable app-cache/content URIs before local encryption. Document attachments use the platform document picker and do not expose readable file contents to the backend.
 
 Private 1-1 chat notifications use the bundled `message-notification.mp3` sound through a dedicated Android notification channel and the iOS notification sound path. Lobby messages stay silent. Users can turn the private-message sound on or off from the settings gear; the preference is stored locally on each device.
+
+When a private chat is opened, Android and iOS clients mark received messages read through the backend. That clears the server-side pending receipt state used by the direct inbox and broadcasts a `message:read` event so the sender can see a read mark.
 
 Important environment variables:
 
