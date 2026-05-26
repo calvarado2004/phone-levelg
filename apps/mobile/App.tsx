@@ -353,8 +353,10 @@ export default function App() {
   const loadingAttachmentPreviewIDsRef = useRef<Set<string>>(new Set());
   const messagesListRef = useRef<FlatList<Message> | null>(null);
   const pendingMessageScrollRef = useRef(false);
+  const messageScrollTimerRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
   const incomingCallExpirationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const outgoingCallTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const endingCallRef = useRef<Promise<void> | null>(null);
   const callKeepReadyRef = useRef(false);
   const incomingCallNotificationRef = useRef<string | null>(null);
   const pendingNativeAcceptCallUUIDRef = useRef<string | null>(null);
@@ -378,6 +380,7 @@ export default function App() {
   const selfReachable = session ? members.find(member => member.id === session.userId)?.reachable !== false : false;
   const connectionStatus = connected ? callStatus : selfReachable ? "Ready" : "Offline";
   const latestMessageID = messages[messages.length - 1]?.id;
+  const latestMessageScrollKey = `${activeRoomID}:${messages.length}:${latestMessageID ?? ""}`;
 
   useEffect(() => {
     incomingCallRef.current = incomingCall;
@@ -385,13 +388,12 @@ export default function App() {
 
   useEffect(() => {
     pendingMessageScrollRef.current = true;
-  }, [activeRoomID]);
+    scheduleMessagesScrollToEnd(true);
+  }, [latestMessageScrollKey]);
 
   useEffect(() => {
-    if (!latestMessageID) return;
-    pendingMessageScrollRef.current = true;
-    scrollMessagesToEnd(true);
-  }, [latestMessageID]);
+    return () => clearScheduledMessageScrolls();
+  }, []);
 
   useEffect(() => {
     privateMessageSoundEnabledRef.current = privateMessageSoundEnabled;
@@ -1374,11 +1376,26 @@ export default function App() {
     return true;
   }
 
-  function scrollMessagesToEnd(animated: boolean) {
+  function clearScheduledMessageScrolls() {
+    messageScrollTimerRefs.current.forEach(timer => clearTimeout(timer));
+    messageScrollTimerRefs.current = [];
+  }
+
+  function scheduleMessagesScrollToEnd(animated: boolean) {
     if (!pendingMessageScrollRef.current || messages.length === 0) return;
-    requestAnimationFrame(() => {
+    clearScheduledMessageScrolls();
+    const scroll = (complete = false) => {
+      if (!pendingMessageScrollRef.current) return;
       messagesListRef.current?.scrollToEnd({ animated });
-      pendingMessageScrollRef.current = false;
+      if (complete) {
+        pendingMessageScrollRef.current = false;
+      }
+    };
+
+    requestAnimationFrame(() => scroll());
+    [80, 180, 360, 700].forEach((delay, index, delays) => {
+      const timer = setTimeout(() => scroll(index === delays.length - 1), delay);
+      messageScrollTimerRefs.current.push(timer);
     });
   }
 
@@ -1544,6 +1561,9 @@ export default function App() {
 
   async function joinCall(mode: "voice" | "video", roomID = activeRoomID, announce = true) {
     if (!session) return;
+    if (endingCallRef.current) {
+      await endingCallRef.current;
+    }
     await stopIncomingCallTone({ deactivateAudio: false });
     if (roomRef.current) {
       await endCurrentCall({ announce: false, status: "Switching call" });
@@ -1597,6 +1617,7 @@ export default function App() {
       roomRef.current = room;
 
       room.on(RoomEvent.Connected, () => {
+        if (roomRef.current !== room) return;
         setCallActive(true);
         setCallStatus("Connected");
         setRemoteParticipantCount(room.remoteParticipants.size);
@@ -1610,36 +1631,45 @@ export default function App() {
         }
       });
       room.on(RoomEvent.ParticipantConnected, () => {
+        if (roomRef.current !== room) return;
         clearOutgoingCallTimeout();
         setRemoteParticipantCount(room.remoteParticipants.size);
         setCallStatus("Connected");
         syncVideoTracks(room);
       });
       room.on(RoomEvent.ParticipantDisconnected, () => {
+        if (roomRef.current !== room) return;
         setRemoteParticipantCount(room.remoteParticipants.size);
         setCallStatus(room.remoteParticipants.size > 0 ? "Connected" : "Waiting for other person");
         syncVideoTracks(room);
       });
       room.on(RoomEvent.TrackSubscribed, () => {
+        if (roomRef.current !== room) return;
         syncVideoTracks(room);
       });
       room.on(RoomEvent.TrackUnsubscribed, () => {
+        if (roomRef.current !== room) return;
         syncVideoTracks(room);
       });
       room.on(RoomEvent.LocalTrackPublished, () => {
+        if (roomRef.current !== room) return;
         syncVideoTracks(room);
       });
       room.on(RoomEvent.LocalTrackUnpublished, () => {
+        if (roomRef.current !== room) return;
         syncVideoTracks(room);
       });
       room.on(RoomEvent.Reconnecting, () => {
+        if (roomRef.current !== room) return;
         setCallStatus("Reconnecting");
       });
       room.on(RoomEvent.Reconnected, () => {
+        if (roomRef.current !== room) return;
         setRemoteParticipantCount(room.remoteParticipants.size);
         setCallStatus("Connected");
       });
       room.on(RoomEvent.Disconnected, () => {
+        if (roomRef.current !== room) return;
         activeCallRoomIDRef.current = null;
         setCallActive(false);
         setCallStatus("Ready");
@@ -1688,40 +1718,57 @@ export default function App() {
   }
 
   async function endCurrentCall({ announce, status, native = true, reason }: { announce: boolean; status: string; native?: boolean; reason?: string }) {
-    await stopIncomingCallTone();
-    clearOutgoingCallTimeout();
-    const roomID = activeCallRoomIDRef.current;
-    const callID = activeCallIDRef.current;
-    const callUUID = activeCallUUIDRef.current;
-    if (announce && roomID) {
-      sendSocket("call:end", { roomId: roomID, callId: callID, reason });
+    if (endingCallRef.current) {
+      await endingCallRef.current;
+      return;
     }
-    if (native && callUUID) {
-      getNativeCallKeep()?.endCall(callUUID);
+
+    const teardown = (async () => {
+      await stopIncomingCallTone();
+      clearOutgoingCallTimeout();
+      const roomID = activeCallRoomIDRef.current;
+      const callID = activeCallIDRef.current;
+      const callUUID = activeCallUUIDRef.current;
+      if (announce && roomID) {
+        sendSocket("call:end", { roomId: roomID, callId: callID, reason });
+      }
+      if (native && callUUID) {
+        getNativeCallKeep()?.endCall(callUUID);
+      }
+      const room = roomRef.current;
+      roomRef.current = null;
+      activeCallRoomIDRef.current = null;
+      activeCallIDRef.current = null;
+      activeCallUUIDRef.current = null;
+      if (callUUID) {
+        delete nativeCallsRef.current[callUUID];
+      }
+      if (room) {
+        await room.localParticipant.setCameraEnabled(false).catch(() => undefined);
+        await room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
+        await stopPublishedMedia(room);
+        await delay(150);
+        await room.disconnect(true).catch(() => undefined);
+        room.removeAllListeners();
+      }
+      setLocalVideoTrack(undefined);
+      setRemoteVideoTrack(undefined);
+      setCameraFacingMode("user");
+      setCallPeer(null);
+      await resetAudioSession();
+      setCallActive(false);
+      setCallStatus(status);
+      setRemoteParticipantCount(0);
+    })();
+
+    endingCallRef.current = teardown;
+    try {
+      await teardown;
+    } finally {
+      if (endingCallRef.current === teardown) {
+        endingCallRef.current = null;
+      }
     }
-    const room = roomRef.current;
-    roomRef.current = null;
-    activeCallRoomIDRef.current = null;
-    activeCallIDRef.current = null;
-    activeCallUUIDRef.current = null;
-    if (callUUID) {
-      delete nativeCallsRef.current[callUUID];
-    }
-    if (room) {
-      await room.localParticipant.setCameraEnabled(false).catch(() => undefined);
-      await room.localParticipant.setMicrophoneEnabled(false).catch(() => undefined);
-      await stopPublishedMedia(room);
-      await room.disconnect(true).catch(() => undefined);
-      room.removeAllListeners();
-    }
-    setLocalVideoTrack(undefined);
-    setRemoteVideoTrack(undefined);
-    setCameraFacingMode("user");
-    setCallPeer(null);
-    await resetAudioSession();
-    setCallActive(false);
-    setCallStatus(status);
-    setRemoteParticipantCount(0);
   }
 
   async function declineIncomingCall(options: { announce?: boolean } = {}) {
@@ -2281,8 +2328,8 @@ export default function App() {
           data={messages}
           keyExtractor={item => item.id}
           contentContainerStyle={styles.messages}
-          onLayout={() => scrollMessagesToEnd(false)}
-          onContentSizeChange={() => scrollMessagesToEnd(false)}
+          onLayout={() => scheduleMessagesScrollToEnd(false)}
+          onContentSizeChange={() => scheduleMessagesScrollToEnd(false)}
           renderItem={({ item }) => {
             const mine = item.senderId === session.userId;
             const attachmentPreviewURI = attachmentPreviewURIs[item.id];
@@ -2536,6 +2583,10 @@ async function fetchJSON(url: string, init?: RequestInit) {
     throw new Error(`Request failed with status ${response.status}`);
   }
   return response.json();
+}
+
+function delay(ms: number) {
+  return new Promise<void>(resolve => setTimeout(resolve, ms));
 }
 
 function getQueryParam(name: string) {
